@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Environment
+.env
+
+# Generated reports
+outputs/*.json
+outputs/*.md
+!outputs/.gitkeep
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+.pytest_cache/

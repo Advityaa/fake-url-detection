@@ -1,0 +1,6 @@
+url,note
+https://example.com,Benign reserved example domain (IANA)
+http://secure-login-verification.example.net/account/update,Fictional suspicious-looking login/verification URL (example.net)
+https://bit.ly/fake-demo,Fictional shortened-URL demo (destination hidden)
+http://192.168.1.10/login,Private IP-address login URL (lab/demo only)
+https://xn--example-demo.com/login,Punycode/homoglyph demo hostname (fictional)

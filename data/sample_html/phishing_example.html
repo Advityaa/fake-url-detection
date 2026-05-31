@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="GlobaPay account verification required - confirm your login and payment details now." />
+  <title>GlobaPay - Account Verification Required</title>
+</head>
+<body>
+  <header>
+    <h1>GlobaPay Secure Account Center</h1>
+  </header>
+
+  <main>
+    <section>
+      <h2>Urgent: Verify Your Account</h2>
+      <p>
+        We detected unusual activity on your GlobaPay wallet. For your security,
+        you must verify your account immediately or it will be suspended within 24 hours.
+        Please sign in and confirm your billing information to restore access.
+      </p>
+
+      <form action="/secure/submit" method="post">
+        <label for="username">Username or email</label>
+        <input type="text" id="username" name="username" placeholder="Enter your username" />
+
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" placeholder="Enter your password" />
+
+        <label for="otp">One time password (OTP)</label>
+        <input type="text" id="otp" name="otp" placeholder="Enter the security code" />
+
+        <h3>Confirm payment information</h3>
+        <label for="card">Card number</label>
+        <input type="text" id="card" name="card" placeholder="Card number" />
+
+        <label for="cvv">CVV</label>
+        <input type="text" id="cvv" name="cvv" placeholder="CVV" />
+
+        <button type="submit">Verify and restore access</button>
+      </form>
+    </section>
+
+    <section>
+      <p>
+        This is a fictional brand ("GlobaPay") used only to demonstrate phishing
+        detection. Do not enter any real credentials.
+      </p>
+    </section>
+  </main>
+
+  <footer>
+    <p>GlobaPay account verification - fictional demo page.</p>
+  </footer>
+</body>
+</html>
