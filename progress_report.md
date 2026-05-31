@@ -162,8 +162,50 @@ Unit tests (run with `pytest`) cover:
   respected, scores sorted, empty-query handling.
 - **Risk engine:** benign vs. phishing scoring, score capping at 100, factor
   generation.
+- **Calibration:** HTTPS-first normalization, evidence-conditioned RAG (no risk
+  for unobserved indicators), e-commerce terms not flagging trusted sites, weak
+  links/scripts signal, brand-domain match/mismatch, trusted-domain mitigation,
+  and the `amazon.com` Likely-Safe scenario.
 
 ---
+
+## 8b. Calibration Improvements (False-Positive Fixes)
+
+During testing, a legitimate site (`amazon.com`) was incorrectly flagged as
+*Suspicious* (score 65). This was traced to several over-aggressive rules, which
+were corrected at the MVP stage before they could distort later work:
+
+1. **HTTPS-first normalization.** Bare domains (e.g. `amazon.com`) are now
+   checked over HTTPS first, with an HTTP fallback only if HTTPS is unreachable.
+   Scoring uses the *final* (post-redirect) URL scheme, removing a spurious
+   "no HTTPS" penalty.
+2. **Evidence-conditioned RAG.** Retrieved knowledge no longer adds risk merely
+   for being semantically similar. It only contributes when a matching indicator
+   was actually observed (e.g. HTTP-risk knowledge adds nothing on an HTTPS page;
+   prompt-injection knowledge adds nothing when no injection was detected).
+3. **Softened common e-commerce terms.** Words like *sign in*, *payment*, and
+   *account* are common on legitimate sites; they now add meaningful risk only
+   when combined with other suspicious signals, and are suppressed for trusted
+   domains / brand-domain matches.
+4. **Weak links/scripts signal.** Many external links/scripts now add only +3 and
+   can never push a site into "Needs Caution" on their own; ignored for trusted
+   domains.
+5. **Brand-domain matching.** If a page's brand appears in the registered domain
+   it is a mitigating factor; a brand that does not match the domain is treated
+   as possible impersonation and increases risk.
+6. **Local trusted-domain allowlist.** A small JSON allowlist provides an MVP
+   demo trust signal (−20) but never hides severe risks such as prompt injection
+   or brand mismatch.
+7. **Recalibrated bands + friendlier wording.** 0–29 *Likely Safe* / 30–59
+   *Needs Caution* / 60–100 *High Risk*, with plain-English recommended actions.
+
+After these fixes, `amazon.com` is classified **Likely Safe** with a very low
+score, while the sample phishing and prompt-injection pages remain **High Risk**.
+
+The UI was also redesigned for non-technical users: a colour-coded result card,
+a "Why did we give this result?" breakdown (risk vs. safety signals), a
+plain-language "Hidden instruction check", understandable knowledge cards, and
+raw JSON moved into an "Advanced technical details" expander.
 
 ## 9. Current Limitations
 

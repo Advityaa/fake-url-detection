@@ -28,13 +28,20 @@ def build_markdown_report(final_result: FinalAnalysisResult) -> str:
     pi = f.prompt_injection
 
     lines: list[str] = []
-    lines.append("# Phishing URL Analysis Report")
+    ui_label = f.risk_assessment.ui_label if f.risk_assessment else f.classification
+    recommended = f.risk_assessment.recommended_action if f.risk_assessment else ""
+
+    lines.append("# Website Safety Analysis Report")
     lines.append("")
     lines.append(f"- **URL analyzed:** `{f.requested_url}`")
     lines.append(f"- **Timestamp (UTC):** {f.timestamp}")
-    lines.append(f"- **Classification:** {f.classification}")
+    lines.append(f"- **Safety result (UI):** {ui_label}")
+    lines.append(f"- **Internal classification:** {f.classification}")
     lines.append(f"- **Risk score:** {f.risk_score}/100")
     lines.append(f"- **Confidence:** {f.confidence_label}")
+    lines.append(f"- **Trusted-domain allowlist match:** {f.is_trusted_domain}")
+    if recommended:
+        lines.append(f"- **Recommended action:** {recommended}")
     lines.append(f"- **Explanation source:** {f.explanation_source}")
     lines.append("")
 
@@ -87,8 +94,21 @@ def build_markdown_report(final_result: FinalAnalysisResult) -> str:
         lines.append(f"  - {msg}")
     lines.append("")
 
+    # Brand-domain check.
+    if f.brand_check is not None:
+        bc = f.brand_check
+        lines.append("## Brand-Domain Check")
+        lines.append("")
+        lines.append(f"- Registered domain: `{bc.registered_domain}`")
+        lines.append(f"- Detected brands: {', '.join(bc.detected_brands) or '(none)'}")
+        lines.append(f"- Brand-domain match: {bc.brand_domain_match}")
+        lines.append(f"- Possible brand mismatch: {bc.possible_brand_mismatch}")
+        for msg in bc.evidence_messages:
+            lines.append(f"  - {msg}")
+        lines.append("")
+
     # Prompt injection.
-    lines.append("## Prompt-Injection Findings")
+    lines.append("## Hidden-Instruction (Prompt-Injection) Findings")
     lines.append("")
     lines.append(f"- Detected: {pi.injection_detected} (severity: {pi.severity})")
     if pi.matched_patterns:

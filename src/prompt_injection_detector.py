@@ -155,6 +155,7 @@ def detect_prompt_injection(html: str = "", visible_text: str = "") -> PromptInj
     # De-duplicate snippets while preserving order.
     result.suspicious_snippets = list(dict.fromkeys(snippets))
     result.injection_detected = bool(matched)
+    result.found_in_hidden = found_in_hidden
     result.severity = _grade_severity(matched, found_in_hidden)
     result.evidence_messages = _build_evidence(result, found_in_hidden)
     return result

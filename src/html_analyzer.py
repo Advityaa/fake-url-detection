@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 
 from .config import SUSPICIOUS_KEYWORDS
-from .schemas import HTMLAnalysisResult
+from .schemas import BrandCheckResult, HTMLAnalysisResult
 from .utils import count_occurrences
 
 # Phrases that indicate the page is asking for credentials / sensitive data.
@@ -138,6 +138,58 @@ def analyze_html(html: str, visible_text: str = "", base_url: str = "") -> HTMLA
     result.brand_like_words = sorted(set(count_occurrences(haystack, _BRAND_LIKE_WORDS)))
 
     result.evidence_messages = _build_evidence(result)
+    return result
+
+
+def check_brand_domain(
+    detected_brands: list[str], registered_domain: str
+) -> BrandCheckResult:
+    """Compare brand-like words found on the page with the registered domain.
+
+    Logic:
+      * If a detected brand word appears inside the registered domain name, this
+        is a *match* (the page brand is consistent with where it is hosted).
+      * If a detected brand word is present but does NOT appear in the registered
+        domain, this is a *possible mismatch* (a hallmark of impersonation).
+
+    Args:
+        detected_brands: Brand-like words found in the page text.
+        registered_domain: The page's registered domain, e.g. "amazon.com".
+
+    Returns:
+        A populated ``BrandCheckResult``.
+    """
+    result = BrandCheckResult(
+        detected_brands=sorted(set(detected_brands)),
+        registered_domain=registered_domain or "",
+    )
+
+    domain_core = (registered_domain or "").split(".")[0].lower()
+
+    if not result.detected_brands:
+        result.evidence_messages.append(
+            "No well-known brand names were detected on the page."
+        )
+        return result
+
+    matched = [b for b in result.detected_brands if b.lower() in domain_core]
+    unmatched = [b for b in result.detected_brands if b.lower() not in domain_core]
+
+    if matched:
+        result.brand_domain_match = True
+        result.evidence_messages.append(
+            "Displayed brand appears to match the registered domain "
+            f"('{', '.join(matched)}' vs '{registered_domain}')."
+        )
+
+    # Only flag a mismatch when a brand is present but none matched the domain.
+    if unmatched and not matched:
+        result.possible_brand_mismatch = True
+        result.evidence_messages.append(
+            "Displayed brand does not match the registered domain "
+            f"('{', '.join(unmatched)}' vs '{registered_domain}'); possible impersonation."
+        )
+
     return result
 
 

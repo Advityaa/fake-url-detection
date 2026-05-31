@@ -108,7 +108,11 @@ def crawl_sample(sample_key: str) -> CrawlResult:
 
 
 def crawl_url(url: str, timeout: Optional[int] = None) -> CrawlResult:
-    """Safely fetch a live URL with a single bounded GET request.
+    """Safely fetch a live URL with a single bounded GET request (HTTPS-first).
+
+    If the URL uses HTTPS and the HTTPS attempt fails with a connection/transport
+    error, the crawler retries once over HTTP. The scheme of the *final* URL
+    (after redirects) is what downstream scoring should rely on.
 
     Args:
         url: The (normalized) URL to fetch.
@@ -131,12 +135,31 @@ def crawl_url(url: str, timeout: Optional[int] = None) -> CrawlResult:
             error="httpx is not installed; cannot perform live crawl.",
         )
 
+    result = _fetch_once(httpx, url, timeout)
+
+    # HTTPS-first fallback: if the secure attempt failed to *connect* (not an
+    # HTTP error response), retry over HTTP so that bare domains still work.
+    if (
+        not result.success
+        and url.lower().startswith("https://")
+        and result.status_code is None
+    ):
+        http_url = "http://" + url[len("https://") :]
+        fallback = _fetch_once(httpx, http_url, timeout)
+        if fallback.success:
+            fallback.requested_url = url  # keep the originally requested URL
+            return fallback
+    return result
+
+
+def _fetch_once(httpx_mod, url: str, timeout: Optional[int]) -> CrawlResult:
+    """Perform a single bounded GET request and build a ``CrawlResult``."""
     timeout = timeout or settings.crawler_timeout_seconds
     headers = {"User-Agent": settings.crawler_user_agent, "Accept": "text/html"}
     redirect_chain: List[str] = []
 
     try:
-        with httpx.Client(
+        with httpx_mod.Client(
             follow_redirects=True,
             timeout=timeout,
             max_redirects=settings.crawler_max_redirects,
@@ -173,8 +196,8 @@ def crawl_url(url: str, timeout: Optional[int] = None) -> CrawlResult:
                 visible_text=extract_visible_text(html),
                 page_title=extract_title(html),
                 source="live",
-                success=True,
-                error=None,
+                success=response.status_code < 400,
+                error=None if response.status_code < 400 else f"HTTP {response.status_code}",
             )
     except Exception as exc:  # noqa: BLE001 - we intentionally swallow all errors
         return CrawlResult(

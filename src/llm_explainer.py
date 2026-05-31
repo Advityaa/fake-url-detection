@@ -78,6 +78,8 @@ class LLMExplainer:
         return {
             "url": url_features.normalized_url,
             "classification": risk_assessment.classification,
+            "ui_label": risk_assessment.ui_label or risk_assessment.classification,
+            "recommended_action": risk_assessment.recommended_action,
             "risk_score": risk_assessment.score,
             "confidence": risk_assessment.confidence_label,
             "url_evidence": url_features.evidence_messages,
@@ -149,74 +151,65 @@ class LLMExplainer:
     # Deterministic fallback
     # ------------------------------------------------------------------
     def generate_fallback_explanation(self, evidence_packet: Dict) -> str:
-        """Generate a readable explanation purely from structured evidence."""
+        """Generate a readable, non-technical explanation from structured evidence."""
         classification = evidence_packet.get("classification", "Unknown")
+        ui_label = evidence_packet.get("ui_label", classification)
         score = evidence_packet.get("risk_score", 0)
-        confidence = evidence_packet.get("confidence", "Low")
         risk_factors = evidence_packet.get("risk_factors", [])
         safe_factors = evidence_packet.get("safe_factors", [])
-        retrieved = evidence_packet.get("retrieved_evidence", [])
 
         parts: List[str] = []
 
-        verdict_sentence = {
+        # Plain-English opening sentence keyed on the verdict.
+        opening = {
             "Likely Phishing": (
-                "This URL shows several strong characteristics of a phishing or "
-                "credential-harvesting page."
+                "This website appears high risk because multiple phishing "
+                "indicators were found, such as a suspicious domain, credential "
+                "collection, brand mismatch, or hidden AI-manipulation instructions. "
+                "Users should not enter passwords, OTPs, or payment details."
             ),
             "Suspicious": (
-                "This URL shows some characteristics that are commonly associated "
-                "with suspicious or phishing pages, but the evidence is not conclusive."
+                "This website needs caution because some suspicious signals were "
+                "found, such as unusual URL words or credential-related page text. "
+                "These signals are not enough to confirm phishing, but users should "
+                "avoid entering sensitive information unless they trust the site."
             ),
             "Likely Benign": (
-                "This URL does not show strong phishing characteristics based on the "
-                "signals analysed."
+                "The website appears likely safe based on the current prototype "
+                "because the domain structure is normal, the final page uses HTTPS, "
+                "no hidden AI-manipulation instructions were found, and the visible "
+                "brand appears to match the domain. This does not guarantee safety, "
+                "but no major phishing indicators were found."
             ),
         }.get(classification, "The analysis produced an inconclusive result.")
 
-        parts.append(
-            f"Classification: {classification} (risk score {score}/100, "
-            f"confidence {confidence}). {verdict_sentence}"
-        )
+        parts.append(f"Result: {ui_label} (risk score {score}/100). {opening}")
 
         if risk_factors:
             parts.append(
-                "The following factors increased the risk score: "
+                "Risk signals found: "
                 + "; ".join(_clean(f) for f in risk_factors)
                 + "."
             )
 
         if evidence_packet.get("injection_detected"):
             parts.append(
-                "Importantly, the page contains prompt-injection style text "
-                f"(severity: {evidence_packet.get('injection_severity', 'low')}). "
-                "Such text tries to manipulate automated analysers; it is treated "
-                "as untrusted evidence and was never executed or obeyed."
+                "A hidden-instruction check found text on the page that tries to "
+                f"manipulate AI tools (severity: {evidence_packet.get('injection_severity', 'low')}). "
+                "This text is treated as untrusted evidence and was never followed."
             )
 
         if safe_factors:
             parts.append(
-                "Mitigating factors observed: "
+                "Safety/mitigating signals found: "
                 + "; ".join(_clean(f) for f in safe_factors)
                 + "."
             )
 
-        if retrieved:
-            top = retrieved[0]
-            parts.append(
-                "Retrieved security knowledge supports this assessment. For example, "
-                f"\"{top['title']}\": {top['content']} "
-                + (
-                    f"Recommended action: {top['recommended_action']}"
-                    if top.get("recommended_action")
-                    else ""
-                )
-            )
-
         parts.append(
-            "Note: this is an automated research prototype. Treat the result as a "
-            "decision-support signal, not a definitive verdict, and do not enter "
-            "credentials into pages flagged as suspicious or phishing."
+            "Note: this is an automated research prototype and a decision-support "
+            "signal, not a definitive verdict. Always verify before entering "
+            "sensitive information."
         )
 
         return "\n\n".join(p.strip() for p in parts if p.strip())

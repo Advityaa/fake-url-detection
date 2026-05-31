@@ -27,7 +27,9 @@ def normalize_url(url: str) -> str:
     """Normalize a URL into a canonical form.
 
     - Strips surrounding whitespace.
-    - Adds an ``http://`` scheme if none was provided (so parsing works).
+    - Adds an ``https://`` scheme if none was provided (HTTPS-first), so a bare
+      domain like ``amazon.com`` is not immediately penalised as insecure. The
+      crawler falls back to HTTP only if HTTPS is unreachable.
     - Lowercases the scheme and hostname (path/query left untouched).
     """
     if url is None:
@@ -37,8 +39,9 @@ def normalize_url(url: str) -> str:
         return ""
 
     # Add a scheme if the user typed a bare domain like "example.com/login".
+    # HTTPS-first: assume secure transport unless proven otherwise.
     if "://" not in url:
-        url = "http://" + url
+        url = "https://" + url
 
     parsed = urlparse(url)
     scheme = parsed.scheme.lower()

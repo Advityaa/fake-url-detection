@@ -3,9 +3,19 @@
 from src.url_features import extract_url_features, normalize_url
 
 
-def test_normalize_adds_scheme_and_lowercases_host():
-    assert normalize_url("Example.COM/Path") == "http://example.com/Path"
+def test_normalize_is_https_first_and_lowercases_host():
+    # Bare domains should be normalized to HTTPS first (Issue 1).
+    assert normalize_url("Example.COM/Path") == "https://example.com/Path"
+    assert normalize_url("amazon.com") == "https://amazon.com"
+    # An explicit scheme is preserved.
     assert normalize_url("  https://Example.com  ") == "https://example.com"
+    assert normalize_url("http://example.com") == "http://example.com"
+
+
+def test_https_first_features_for_bare_domain():
+    f = extract_url_features("amazon.com")
+    assert f.scheme == "https"
+    assert f.uses_https is True
 
 
 def test_basic_https_features():

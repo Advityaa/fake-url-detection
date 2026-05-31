@@ -1,0 +1,13 @@
+{
+  "_comment": "Local MVP-only allowlist of well-known registered domains. This is a prototype trust signal for demos, NOT a security guarantee. Severe risks (e.g. prompt injection or brand mismatch) are still reported even for these domains.",
+  "domains": [
+    "amazon.com",
+    "google.com",
+    "microsoft.com",
+    "apple.com",
+    "github.com",
+    "wikipedia.org",
+    "openai.com",
+    "example.com"
+  ]
+}

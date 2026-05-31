@@ -94,6 +94,21 @@ class PromptInjectionResult:
     matched_patterns: List[str] = field(default_factory=list)
     suspicious_snippets: List[str] = field(default_factory=list)
     severity: str = "low"  # low / medium / high
+    found_in_hidden: bool = False
+    evidence_messages: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class BrandCheckResult:
+    """Result of comparing brand-like words on the page with the domain."""
+
+    detected_brands: List[str] = field(default_factory=list)
+    registered_domain: str = ""
+    brand_domain_match: bool = False
+    possible_brand_mismatch: bool = False
     evidence_messages: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -123,7 +138,9 @@ class RiskAssessmentResult:
     """Output of the transparent rule-based risk engine."""
 
     score: int = 0
-    classification: str = ""
+    classification: str = ""  # internal label (Likely Benign / Suspicious / Likely Phishing)
+    ui_label: str = ""  # user-friendly label (Likely Safe / Needs Caution / High Risk)
+    recommended_action: str = ""  # plain-English guidance for the user
     confidence_label: str = "Low"  # Low / Medium / High
     risk_factors: List[str] = field(default_factory=list)
     safe_factors: List[str] = field(default_factory=list)
@@ -146,6 +163,8 @@ class FinalAnalysisResult:
     crawl: CrawlResult
     html_analysis: HTMLAnalysisResult
     prompt_injection: PromptInjectionResult
+    brand_check: Optional["BrandCheckResult"] = None
+    is_trusted_domain: bool = False
     retrieved_evidence: List[RetrievedEvidence] = field(default_factory=list)
     risk_assessment: Optional[RiskAssessmentResult] = None
     explanation: str = ""
@@ -163,6 +182,8 @@ class FinalAnalysisResult:
             "crawl": self.crawl.to_dict(),
             "html_analysis": self.html_analysis.to_dict(),
             "prompt_injection": self.prompt_injection.to_dict(),
+            "brand_check": self.brand_check.to_dict() if self.brand_check else None,
+            "is_trusted_domain": self.is_trusted_domain,
             "retrieved_evidence": [e.to_dict() for e in self.retrieved_evidence],
             "risk_assessment": (
                 self.risk_assessment.to_dict() if self.risk_assessment else None

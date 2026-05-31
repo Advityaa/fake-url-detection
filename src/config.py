@@ -131,13 +131,69 @@ URL_SHORTENER_DOMAINS: List[str] = [
     "ow.ly",
 ]
 
-# Risk classification thresholds (inclusive lower bound).
+# Internal classification labels (kept stable for reports / tests).
 CLASS_BENIGN = "Likely Benign"
 CLASS_SUSPICIOUS = "Suspicious"
 CLASS_PHISHING = "Likely Phishing"
 
-SUSPICIOUS_THRESHOLD = 40
-PHISHING_THRESHOLD = 70
+# Recalibrated thresholds (inclusive lower bound):
+#   0-29  -> Likely Benign  (UI: "Likely Safe")
+#   30-59 -> Suspicious     (UI: "Needs Caution")
+#   60-100-> Likely Phishing(UI: "High Risk")
+SUSPICIOUS_THRESHOLD = 30
+PHISHING_THRESHOLD = 60
+
+# User-friendly labels shown in the UI (internal label -> UI label).
+UI_LABELS = {
+    CLASS_BENIGN: "Likely Safe",
+    CLASS_SUSPICIOUS: "Needs Caution",
+    CLASS_PHISHING: "High Risk",
+}
+
+# Plain-English action recommendations per UI label.
+ACTION_RECOMMENDATIONS = {
+    CLASS_BENIGN: (
+        "No major phishing indicators were found. Still verify before entering "
+        "sensitive information."
+    ),
+    CLASS_SUSPICIOUS: (
+        "Some suspicious signals were found. Avoid entering passwords or payment "
+        "details unless you are sure."
+    ),
+    CLASS_PHISHING: (
+        "Strong phishing indicators were found. Do not enter credentials or "
+        "payment details."
+    ),
+}
+
+
+def ui_label(classification: str) -> str:
+    """Map an internal classification label to its user-friendly UI label."""
+    return UI_LABELS.get(classification, classification)
+
+
+def action_recommendation(classification: str) -> str:
+    """Return the plain-English recommended action for a classification."""
+    return ACTION_RECOMMENDATIONS.get(classification, "")
+
+
+# Local trusted-domain allowlist (MVP demo signal only, not a security guarantee).
+TRUSTED_DOMAINS_PATH: Path = DATA_DIR / "trusted_domains.json"
+
+
+def load_trusted_domains() -> List[str]:
+    """Load the local trusted-domain allowlist (lowercased). Empty on failure."""
+    import json
+
+    try:
+        raw = TRUSTED_DOMAINS_PATH.read_text(encoding="utf-8")
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            data = data.get("domains", [])
+        return [str(d).strip().lower() for d in data if str(d).strip()]
+    except (OSError, ValueError):
+        return []
+
 
 # A single shared settings instance used by the app and modules.
 settings = Settings()
