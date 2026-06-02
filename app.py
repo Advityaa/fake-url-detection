@@ -196,9 +196,15 @@ def render_summary_card(result: FinalAnalysisResult) -> None:
     risk = result.risk_assessment
     label = risk.ui_label if risk else result.classification
     style, emoji = _STATUS_STYLE.get(label, ("info", "ℹ️"))
-    headline = f"{emoji} **{label}** — risk score {result.risk_score}/100 (confidence: {result.confidence_label})"
+    
+    card_class = "result-card-warning"
+    if style == "success":
+        card_class = "result-card-success"
+    elif style == "error":
+        card_class = "result-card-error"
 
-    getattr(st, style)(headline)
+    headline = f"<div class='{card_class}' style='margin-bottom: 2rem;'><h3>{emoji} {label}</h3><p style='margin: 0; font-size: 1.1rem;'>Risk Score: <strong>{result.risk_score}/100</strong> (Confidence: {result.confidence_label})</p></div>"
+    st.markdown(headline, unsafe_allow_html=True)
 
     col1, col2, col3 = st.columns(3)
     col1.metric("Safety result", label)
@@ -357,6 +363,14 @@ def _friendly(factor: str) -> str:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+def load_css(file_name: str) -> None:
+    from pathlib import Path
+    css_path = Path(__file__).parent / file_name
+    if css_path.exists():
+        with open(css_path) as f:
+            st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
+
+
 def main() -> None:
     st.set_page_config(
         page_title="Fake Website Safety Checker",
@@ -364,12 +378,15 @@ def main() -> None:
         layout="wide",
     )
 
+    load_css("src/style.css")
+
     render_sidebar()
 
-    st.title("🛡️ Fake Website Safety Checker")
+    st.markdown('<div class="gradient-text">🛡️ Fake Website Safety Checker</div>', unsafe_allow_html=True)
     st.markdown(
-        "Research prototype using URL analysis, webpage evidence, local RAG, and "
-        "explainable risk scoring."
+        '<div class="sub-header">Research prototype using URL analysis, webpage evidence, local RAG, and '
+        'explainable risk scoring.</div>',
+        unsafe_allow_html=True
     )
     st.info(
         "This tool is for research and decision support only. It does not "

@@ -1,0 +1,131 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap');
+
+/* Global Typography */
+html, body, [class*="css"] {
+    font-family: 'Outfit', sans-serif !important;
+}
+
+/* App Background (Dark Mode Sleek) */
+.stApp {
+    background: #0d1117;
+    color: #e6edf3;
+}
+
+/* Gradient Header */
+.gradient-text {
+    background: linear-gradient(90deg, #00C9FF 0%, #92FE9D 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    font-weight: 700;
+    font-size: 2.8rem;
+    margin-bottom: 0.5rem;
+}
+
+.sub-header {
+    color: #8b949e;
+    font-size: 1.1rem;
+    font-weight: 400;
+    margin-bottom: 2rem;
+}
+
+/* Glassmorphism Cards */
+.st-emotion-cache-1wivap2, .st-emotion-cache-1r6slb0, .st-emotion-cache-keje6w, div[data-testid="stExpander"] > details {
+    background: rgba(22, 27, 34, 0.6) !important;
+    border: 1px solid rgba(48, 54, 61, 0.8) !important;
+    backdrop-filter: blur(10px) !important;
+    -webkit-backdrop-filter: blur(10px) !important;
+    border-radius: 12px !important;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2) !important;
+    transition: transform 0.2s ease, box-shadow 0.2s ease !important;
+}
+
+div[data-testid="stExpander"] > details:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.3) !important;
+}
+
+/* Modern Input Fields */
+.stTextInput > div > div > input {
+    background-color: rgba(13, 17, 23, 0.8) !important;
+    color: #e6edf3 !important;
+    border: 1px solid #30363d !important;
+    border-radius: 8px !important;
+    padding: 0.8rem !important;
+    font-size: 1rem !important;
+}
+
+.stTextInput > div > div > input:focus {
+    border-color: #58a6ff !important;
+    box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.3) !important;
+}
+
+/* Beautiful Buttons */
+.stButton > button {
+    background: linear-gradient(135deg, #238636 0%, #2ea043 100%) !important;
+    color: #ffffff !important;
+    border: none !important;
+    border-radius: 8px !important;
+    padding: 0.6rem 1.5rem !important;
+    font-weight: 600 !important;
+    font-size: 1rem !important;
+    box-shadow: 0 4px 14px rgba(46, 160, 67, 0.4) !important;
+    transition: all 0.3s ease !important;
+}
+
+.stButton > button:hover {
+    transform: translateY(-2px) !important;
+    box-shadow: 0 6px 20px rgba(46, 160, 67, 0.6) !important;
+    background: linear-gradient(135deg, #2ea043 0%, #3fb950 100%) !important;
+}
+
+/* Secondary Button style for downloads */
+.stDownloadButton > button {
+    background: linear-gradient(135deg, #1f6feb 0%, #388bfd 100%) !important;
+    box-shadow: 0 4px 14px rgba(56, 139, 253, 0.4) !important;
+}
+.stDownloadButton > button:hover {
+    box-shadow: 0 6px 20px rgba(56, 139, 253, 0.6) !important;
+    background: linear-gradient(135deg, #388bfd 0%, #58a6ff 100%) !important;
+}
+
+/* Metrics Dashboard Styling */
+[data-testid="stMetricValue"] {
+    font-size: 2rem !important;
+    font-weight: 700 !important;
+}
+[data-testid="stMetricLabel"] {
+    font-size: 0.9rem !important;
+    color: #8b949e !important;
+    font-weight: 500 !important;
+}
+
+/* Custom Success/Warning/Error Cards via markdown */
+.result-card-success {
+    background: rgba(46, 160, 67, 0.1);
+    border-left: 4px solid #3fb950;
+    padding: 1rem 1.5rem;
+    border-radius: 8px;
+    margin: 1rem 0;
+}
+
+.result-card-warning {
+    background: rgba(210, 153, 34, 0.1);
+    border-left: 4px solid #e3b341;
+    padding: 1rem 1.5rem;
+    border-radius: 8px;
+    margin: 1rem 0;
+}
+
+.result-card-error {
+    background: rgba(248, 81, 73, 0.1);
+    border-left: 4px solid #ff7b72;
+    padding: 1rem 1.5rem;
+    border-radius: 8px;
+    margin: 1rem 0;
+}
+
+/* Sidebar Customization */
+[data-testid="stSidebar"] {
+    background-color: #0d1117 !important;
+    border-right: 1px solid #30363d !important;
+}
