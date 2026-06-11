@@ -16,16 +16,11 @@ from typing import Optional
 import streamlit as st
 
 from src.config import OUTPUTS_DIR, load_trusted_domains, settings
-from src.crawler import crawl_sample, crawl_url
-from src.html_analyzer import analyze_html, check_brand_domain
-from src.llm_explainer import LLMExplainer
-from src.prompt_injection_detector import detect_prompt_injection
-from src.rag_retriever import RAGRetriever, build_query
+from src.pipeline import analyze_url
+from src.rag_retriever import RAGRetriever
 from src.report_generator import build_markdown_report, save_json_report, save_markdown_report
-from src.risk_engine import assess_risk
 from src.schemas import FinalAnalysisResult
-from src.url_features import extract_url_features, normalize_url
-from src.utils import safe_filename_stamp, utc_timestamp
+from src.utils import safe_filename_stamp
 
 MVP_LIMITATIONS = [
     "Research prototype only - not a production security control.",
@@ -80,7 +75,7 @@ def get_trusted_domains() -> set[str]:
 # Core analysis pipeline
 # ---------------------------------------------------------------------------
 def analyze(url: str, mode: str) -> Optional[FinalAnalysisResult]:
-    """Run the full analysis pipeline for a URL.
+    """Run the full analysis pipeline for a URL (delegates to ``src.pipeline``).
 
     Args:
         url: Raw URL string (used for feature extraction; also live-crawled).
@@ -89,80 +84,11 @@ def analyze(url: str, mode: str) -> Optional[FinalAnalysisResult]:
     Returns:
         A populated ``FinalAnalysisResult`` or ``None`` if input is invalid.
     """
-    normalized = normalize_url(url) if url else ""
-    if mode == "live" and not normalized:
-        return None
-
-    # 1. Crawl (live, HTTPS-first) or load sample HTML.
-    if mode == "live":
-        crawl = crawl_url(normalized)
-    else:
-        crawl = crawl_sample(mode)
-
-    # 2. URL features. For a successful live crawl, recompute from the FINAL URL
-    #    so the scheme used for scoring reflects redirects (HTTPS-first).
-    feature_url = url or normalized or "https://local.sample"
-    if mode == "live" and crawl.success and crawl.final_url:
-        feature_url = crawl.final_url
-    url_features = extract_url_features(feature_url)
-
-    # 3. HTML analysis.
-    html_analysis = analyze_html(crawl.html, crawl.visible_text, base_url=crawl.final_url)
-
-    # 4. Brand-domain check.
-    registered_domain = ".".join(p for p in [url_features.domain, url_features.suffix] if p)
-    brand_check = check_brand_domain(html_analysis.brand_like_words, registered_domain)
-
-    # 5. Prompt-injection (hidden instruction) detection.
-    prompt_injection = detect_prompt_injection(crawl.html, crawl.visible_text)
-
-    # 6. Trusted-domain allowlist (MVP demo signal only).
-    is_trusted = bool(registered_domain) and registered_domain.lower() in get_trusted_domains()
-
-    # 7. RAG retrieval.
-    retriever = get_retriever()
-    query = build_query(
-        url_features.evidence_messages,
-        html_analysis.evidence_messages,
-        prompt_injection.evidence_messages,
-        extra_terms=url_features.suspicious_keywords_found
-        + html_analysis.credential_patterns_found,
-    )
-    retrieved = retriever.retrieve(query)
-
-    # 8. Risk assessment (evidence-conditioned).
-    risk = assess_risk(
-        url_features,
-        html_analysis,
-        prompt_injection,
-        retrieved,
-        brand_check=brand_check,
-        is_trusted_domain=is_trusted,
-        redirect_count=len(crawl.redirect_chain),
-    )
-
-    # 9. Explanation (LLM if configured, else deterministic fallback).
-    explainer = LLMExplainer()
-    explanation, source = explainer.generate_explanation(
-        url_features, html_analysis, prompt_injection, retrieved, risk
-    )
-
-    return FinalAnalysisResult(
-        requested_url=url if mode == "live" else f"[sample:{mode}] {url}".strip(),
-        timestamp=utc_timestamp(),
-        classification=risk.classification,
-        risk_score=risk.score,
-        confidence_label=risk.confidence_label,
-        url_features=url_features,
-        crawl=crawl,
-        html_analysis=html_analysis,
-        prompt_injection=prompt_injection,
-        brand_check=brand_check,
-        is_trusted_domain=is_trusted,
-        retrieved_evidence=retrieved,
-        risk_assessment=risk,
-        explanation=explanation,
-        explanation_source=source,
+    return analyze_url(
+        url,
+        mode,
+        retriever=get_retriever(),
+        trusted_domains=get_trusted_domains(),
         limitations=MVP_LIMITATIONS,
     )
 

@@ -34,8 +34,13 @@ class URLFeatureResult:
     contains_punycode: bool
     uses_https: bool
     suspicious_keywords_found: List[str] = field(default_factory=list)
+    suspicious_keywords_in_host: List[str] = field(default_factory=list)
     is_shortened_url: bool = False
     entropy_score: float = 0.0
+    registered_domain: str = ""
+    impersonated_brand: str = ""
+    lookalike_brand: str = ""
+    suspicious_tld: bool = False
     evidence_messages: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -145,6 +150,8 @@ class RiskAssessmentResult:
     risk_factors: List[str] = field(default_factory=list)
     safe_factors: List[str] = field(default_factory=list)
     explanation_points: List[str] = field(default_factory=list)
+    # Per-category point contributions, for a transparent UI breakdown.
+    score_breakdown: Dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

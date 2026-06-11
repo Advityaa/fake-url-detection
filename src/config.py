@@ -131,6 +131,59 @@ URL_SHORTENER_DOMAINS: List[str] = [
     "ow.ly",
 ]
 
+# Well-known brands frequently impersonated by phishing, mapped to the set of
+# legitimate registered domains they actually use. Used for two offline signals:
+#   * brand-in-URL impersonation: a brand token appears in the hostname but the
+#     registered domain is NOT one of the brand's real domains.
+#   * lookalike / typosquat: the registered domain core is a near-miss of a brand
+#     token (edit distance / leetspeak), e.g. "paypa1", "g00gle", "arnazon".
+# Generic words (e.g. "bank") are deliberately excluded to avoid false positives.
+KNOWN_BRANDS: dict[str, set[str]] = {
+    "paypal": {"paypal.com"},
+    "microsoft": {"microsoft.com", "microsoftonline.com", "office.com", "live.com"},
+    "office365": {"office.com", "microsoft.com"},
+    "outlook": {"outlook.com", "microsoft.com", "live.com"},
+    "google": {"google.com"},
+    "gmail": {"google.com", "gmail.com"},
+    "apple": {"apple.com"},
+    "icloud": {"icloud.com", "apple.com"},
+    "amazon": {"amazon.com"},
+    "facebook": {"facebook.com", "fb.com"},
+    "instagram": {"instagram.com"},
+    "whatsapp": {"whatsapp.com"},
+    "netflix": {"netflix.com"},
+    "linkedin": {"linkedin.com"},
+    "dropbox": {"dropbox.com"},
+    "adobe": {"adobe.com"},
+    "ebay": {"ebay.com"},
+    "walmart": {"walmart.com"},
+    "coinbase": {"coinbase.com"},
+    "binance": {"binance.com"},
+    "chase": {"chase.com"},
+    "wellsfargo": {"wellsfargo.com"},
+    "citibank": {"citi.com", "citibank.com"},
+    "hsbc": {"hsbc.com"},
+    "amex": {"americanexpress.com"},
+    "americanexpress": {"americanexpress.com"},
+    "dhl": {"dhl.com"},
+    "fedex": {"fedex.com"},
+    "usps": {"usps.com"},
+    "ups": {"ups.com"},
+    "steam": {"steampowered.com", "valvesoftware.com"},
+    "discord": {"discord.com", "discordapp.com"},
+    "spotify": {"spotify.com"},
+    "roblox": {"roblox.com"},
+    "tiktok": {"tiktok.com"},
+}
+
+# TLDs disproportionately abused for phishing / free-registration abuse. Presence
+# adds a small amount of risk (never decisive on its own).
+SUSPICIOUS_TLDS: set[str] = {
+    "tk", "ml", "ga", "cf", "gq", "xyz", "top", "club", "work", "click",
+    "link", "country", "gdn", "kim", "loan", "men", "stream", "download",
+    "racing", "win", "review", "date", "zip", "mov", "rest", "cam", "sbs",
+}
+
 # Internal classification labels (kept stable for reports / tests).
 CLASS_BENIGN = "Likely Benign"
 CLASS_SUSPICIOUS = "Suspicious"

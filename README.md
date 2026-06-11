@@ -29,14 +29,20 @@ deterministic fallback, a Streamlit UI, and report export.
 5. Form and password-field detection
 6. Prompt-injection ("hidden instruction") detection over visible **and hidden** content
 7. **Brand-domain matching** (match reduces risk, mismatch increases it)
-8. **Local trusted-domain allowlist** (MVP demo signal, not a guarantee)
-9. Lightweight local RAG using a JSON knowledge base + TF-IDF similarity
-10. Transparent rule-based risk scoring (0–100) with **evidence-conditioned RAG**
-11. Optional LLM explanation module with a deterministic, non-technical fallback
-12. Non-technical Streamlit UI (plain-English result, reasons, advanced expanders)
-13. JSON / Markdown analysis report export
-14. Unit tests for the core modules
-15. This README and `progress_report.md`
+8. **Brand impersonation in the URL itself** (e.g. `paypal.secure-login.example.net`,
+   `paypalsecure.com`) — detected even when the page does not load
+9. **Lookalike / typosquat detection** (leetspeak `paypa1`→paypal, `g00gle`→google,
+   plus edit-distance typos) and **suspicious-TLD** scoring (`.tk`, `.xyz`, `.zip`, …)
+10. **Local trusted-domain allowlist** (MVP demo signal, not a guarantee)
+11. Lightweight local RAG using a JSON knowledge base + TF-IDF similarity
+12. Transparent rule-based risk scoring (0–100) with **evidence-conditioned RAG**,
+    centralized weights, and a per-category **score breakdown**
+13. Optional LLM explanation module with a deterministic, non-technical fallback
+14. **Two front-ends over one shared pipeline** (`src/pipeline.py`): a Streamlit
+    app and a React (Sentinel) + FastAPI app
+15. JSON / Markdown analysis report export
+16. Unit tests for the core modules
+17. This README and `progress_report.md`
 
 ### False-positive calibration (added after an `amazon.com` test)
 
@@ -97,11 +103,35 @@ cp .env.example .env   # then edit values; LLM is OFF by default
 
 ## How to run
 
+There are two interchangeable front-ends; both call the same analysis pipeline
+in `src/pipeline.py`, so results are identical.
+
+### Option A — Streamlit (single process, Python only)
+
 ```bash
 streamlit run app.py
 ```
 
 Then open the local URL Streamlit prints (usually http://localhost:8501).
+
+### Option B — React "Sentinel" UI + FastAPI backend
+
+Run the API and the React dev server in two terminals:
+
+```bash
+# Terminal 1 — FastAPI backend (http://localhost:8000)
+uvicorn api:app --port 8000
+
+# Terminal 2 — React frontend (http://localhost:5173)
+cd frontend
+npm install      # first time only
+npm run dev
+```
+
+Open the URL Vite prints (usually http://localhost:5173). The frontend calls
+`POST http://localhost:8000/api/analyze`. The React UI shows an animated risk
+gauge, a per-category score breakdown, URL anatomy, retrieved knowledge, the
+hidden-instruction check, and the explanation.
 
 ## How to run tests
 
@@ -136,7 +166,15 @@ pytest -v
 
 ```
 .
-├── app.py                      # Streamlit UI + analysis pipeline
+├── app.py                      # Streamlit UI (calls src/pipeline.py)
+├── api.py                      # FastAPI backend (calls src/pipeline.py)
+├── frontend/                   # React (Vite) "Sentinel" UI
+│   ├── index.html
+│   ├── package.json
+│   └── src/
+│       ├── App.jsx             # full results UI (gauge, breakdown, anatomy, …)
+│       ├── index.css
+│       └── main.jsx
 ├── requirements.txt
 ├── README.md
 ├── progress_report.md
@@ -156,14 +194,15 @@ pytest -v
 │
 ├── src/
 │   ├── __init__.py
-│   ├── config.py               # settings + shared vocab (from .env)
+│   ├── config.py               # settings + shared vocab, known brands, TLDs
+│   ├── pipeline.py             # shared analysis pipeline (used by app.py & api.py)
 │   ├── schemas.py              # dataclasses for all result objects
-│   ├── url_features.py
+│   ├── url_features.py         # incl. brand-impersonation / lookalike detection
 │   ├── crawler.py
 │   ├── html_analyzer.py
 │   ├── prompt_injection_detector.py
 │   ├── rag_retriever.py
-│   ├── risk_engine.py
+│   ├── risk_engine.py          # centralized weights + per-category breakdown
 │   ├── llm_explainer.py
 │   ├── report_generator.py
 │   └── utils.py
@@ -203,6 +242,3 @@ pytest -v
 - A labelled evaluation set with proper metrics and error analysis.
 - A real LLM-backed explanation (Anthropic Claude / OpenAI) behind `USE_LLM=true`.
 - Optional browser-extension front-end and deployment.
-#   f a k e - u r l - d e t e c t i o n 
- 
- 

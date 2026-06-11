@@ -13,9 +13,14 @@ from urllib.parse import urlparse, urlunparse
 
 import tldextract
 
-from .config import SUSPICIOUS_KEYWORDS, URL_SHORTENER_DOMAINS
+from .config import (
+    KNOWN_BRANDS,
+    SUSPICIOUS_KEYWORDS,
+    SUSPICIOUS_TLDS,
+    URL_SHORTENER_DOMAINS,
+)
 from .schemas import URLFeatureResult
-from .utils import shannon_entropy
+from .utils import levenshtein, normalize_leetspeak, shannon_entropy
 
 # tldextract instance configured to avoid network calls (uses bundled snapshot).
 _EXTRACTOR = tldextract.TLDExtract(suffix_list_urls=())
@@ -76,6 +81,86 @@ def _contains_punycode(hostname: str) -> bool:
     return "xn--" in (hostname or "").lower()
 
 
+def _host_tokens(hostname: str) -> list[str]:
+    """Split a hostname into lowercase word tokens (on dots and hyphens)."""
+    if not hostname:
+        return []
+    return [t for t in re.split(r"[.\-]", hostname.lower()) if t]
+
+
+# Phishy affixes that, glued onto a brand token, indicate impersonation
+# (e.g. "paypalsecure", "applesupport"). Used to allow boundary-less matches
+# without false-positiving on unrelated words like "applebees".
+_BRAND_AFFIXES = {
+    "login", "signin", "secure", "verify", "account", "accounts", "support",
+    "help", "update", "confirm", "online", "auth", "portal", "billing", "pay",
+    "payment", "service", "services", "team", "alert", "security", "id", "center",
+}
+
+
+def detect_brand_impersonation(hostname: str, registered_domain: str) -> str:
+    """Detect a known brand appearing in the host of a non-brand domain.
+
+    Returns the impersonated brand token if a known brand appears in the hostname
+    (subdomain or domain core) but the registered domain is NOT one of that
+    brand's legitimate domains (e.g. ``paypal.secure-login.net``,
+    ``paypalsecure.com``). Returns "" when the registered domain legitimately
+    belongs to the brand, or when the brand only appears as part of an unrelated
+    word (e.g. ``applebees.com``).
+    """
+    if not hostname:
+        return ""
+    registered = (registered_domain or "").lower()
+    tokens = _host_tokens(hostname)
+    # Also compare leetspeak-folded tokens so "g00gle" / "paypa1" are caught.
+    folded_tokens = [(tok, normalize_leetspeak(tok)) for tok in tokens]
+    for brand, legit_domains in KNOWN_BRANDS.items():
+        if registered in legit_domains:
+            continue  # genuinely the brand's own domain (any subdomain is fine)
+        for tok, folded in folded_tokens:
+            # Whole-label match: "paypal" in "paypal.secure-login.net" (or "g00gle").
+            if tok == brand or folded == brand:
+                return brand
+            # Brand glued to a known phishy affix: "paypalsecure", "applesupport".
+            if tok.startswith(brand) and tok[len(brand):] in _BRAND_AFFIXES:
+                return brand
+            if tok.endswith(brand) and tok[: -len(brand)] in _BRAND_AFFIXES:
+                return brand
+    return ""
+
+
+def detect_lookalike_brand(registered_domain: str) -> str:
+    """Detect a registered domain core that is a near-miss of a known brand.
+
+    Catches typosquats via leetspeak folding (``paypa1`` -> ``paypal``) and an
+    edit-distance-1 check (``arnazon`` vs ``amazon``), while skipping the brand's
+    own legitimate domains. Returns the brand token, or "".
+    """
+    registered = (registered_domain or "").lower()
+    core = registered.split(".")[0]
+    if len(core) < 4:
+        return ""
+    folded = normalize_leetspeak(core)
+    for brand, legit_domains in KNOWN_BRANDS.items():
+        if registered in legit_domains or core == brand or len(brand) < 4:
+            continue
+        # Leetspeak match (a digit was swapped for a look-alike letter): strong,
+        # low-false-positive signal — "paypa1"->"paypal", "g00gle"->"google".
+        if folded == brand and folded != core:
+            return brand
+        # Edit-distance-1 typo on a longer brand of the same length and first
+        # letter ("paypol" vs "paypal"). Restricted to brands >= 6 chars to avoid
+        # false positives on short, common-letter words ("ample" vs "apple").
+        if (
+            len(brand) >= 6
+            and len(core) == len(brand)
+            and core[0] == brand[0]
+            and levenshtein(core, brand) == 1
+        ):
+            return brand
+    return ""
+
+
 def extract_url_features(url: str) -> URLFeatureResult:
     """Extract lexical features and evidence messages from a URL.
 
@@ -114,9 +199,20 @@ def extract_url_features(url: str) -> URLFeatureResult:
             if kw.lower() in normalized.lower()
         }
     )
+    # Keywords appearing in the HOSTNAME specifically are far more indicative of
+    # phishing than keywords in the path (legitimate sites routinely use paths
+    # like "/login" or "/account"). Scored separately to cut false positives.
+    host_lower = hostname.lower()
+    suspicious_in_host = sorted(
+        {kw for kw in SUSPICIOUS_KEYWORDS if kw.lower() in host_lower}
+    )
 
     registered_domain = ".".join(p for p in [domain, suffix] if p)
     is_shortened = registered_domain.lower() in URL_SHORTENER_DOMAINS
+
+    impersonated_brand = detect_brand_impersonation(hostname, registered_domain)
+    lookalike_brand = detect_lookalike_brand(registered_domain)
+    suspicious_tld = suffix.lower().split(".")[-1] in SUSPICIOUS_TLDS if suffix else False
 
     entropy = shannon_entropy(hostname)
 
@@ -140,8 +236,13 @@ def extract_url_features(url: str) -> URLFeatureResult:
         contains_punycode=contains_puny,
         uses_https=uses_https,
         suspicious_keywords_found=suspicious_found,
+        suspicious_keywords_in_host=suspicious_in_host,
         is_shortened_url=is_shortened,
         entropy_score=entropy,
+        registered_domain=registered_domain,
+        impersonated_brand=impersonated_brand,
+        lookalike_brand=lookalike_brand,
+        suspicious_tld=suspicious_tld,
     )
 
     features.evidence_messages = _build_evidence(features)
@@ -152,6 +253,21 @@ def _build_evidence(f: URLFeatureResult) -> list[str]:
     """Build human-readable evidence messages from extracted features."""
     messages: list[str] = []
 
+    if f.impersonated_brand:
+        messages.append(
+            f"URL references the brand '{f.impersonated_brand}' but is not hosted on that "
+            f"brand's official domain (registered domain: '{f.registered_domain}'); "
+            "a hallmark of brand impersonation."
+        )
+    if f.lookalike_brand:
+        messages.append(
+            f"Registered domain looks like a misspelling of '{f.lookalike_brand}' "
+            "(possible typosquatting / lookalike domain)."
+        )
+    if f.suspicious_tld:
+        messages.append(
+            f"Domain uses a top-level domain ('.{f.suffix}') frequently abused for phishing."
+        )
     if f.contains_ip_address:
         messages.append("URL uses a raw IP address instead of a domain name.")
     if f.contains_at_symbol:
