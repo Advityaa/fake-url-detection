@@ -1,0 +1,29 @@
+<!doctype html>
+<html>
+<head><title>Members Area</title></head>
+<body style="margin:0">
+  <!-- BENIGN TEST FIXTURE: demonstrates dynamic cloaking for the detector's
+       own tests. The initial HTML has NO password field; one is injected only
+       after a scroll event, so a static/single-snapshot analysis would miss it. -->
+  <h1>Welcome to the Members Area</h1>
+  <form id="login-form">
+    <input type="text" name="username" placeholder="Username">
+  </form>
+  <div style="height:3000px">Scroll down to continue…</div>
+
+  <script>
+    var injected = false;
+    function revealPasswordField() {
+      if (injected) return;
+      injected = true;
+      var pw = document.createElement('input');
+      pw.type = 'password';
+      pw.name = 'password';
+      pw.placeholder = 'Password';
+      document.getElementById('login-form').appendChild(pw);
+    }
+    // Reveal the credential field only after the user (or the analyzer) scrolls.
+    window.addEventListener('scroll', revealPasswordField, { once: true });
+  </script>
+</body>
+</html>

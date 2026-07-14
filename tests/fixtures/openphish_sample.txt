@@ -1,0 +1,7 @@
+# Sample OpenPhish-style feed used ONLY for tests.
+# All entries are FICTIONAL and use reserved test domains/IPs (.test, .example,
+# TEST-NET 192.0.2.0/24). No real malicious URLs are included.
+http://paypal-login.example-phish.test/verify
+http://acme-bank.secure-login.test/account/update
+https://login.microsoft-account-verify.test/signin
+http://192.0.2.10/wallet/confirm

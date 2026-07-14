@@ -27,6 +27,9 @@ def test_brand_glued_to_affix_is_impersonation():
 def test_legit_brand_domain_is_not_impersonation():
     assert detect_brand_impersonation("www.paypal.com", "paypal.com") == ""
     assert detect_brand_impersonation("accounts.google.com", "google.com") == ""
+    # Regression (found by the evaluation harness): office365.com is Microsoft's
+    # own domain and must not be flagged as impersonating "office365".
+    assert detect_brand_impersonation("office365.com", "office365.com") == ""
 
 
 def test_unrelated_word_containing_brand_is_not_impersonation():

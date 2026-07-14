@@ -30,6 +30,12 @@ SAMPLE_HTML_DIR: Path = DATA_DIR / "sample_html"
 OUTPUTS_DIR: Path = PROJECT_ROOT / "outputs"
 KNOWLEDGE_BASE_PATH: Path = DATA_DIR / "knowledge_base.json"
 SAMPLE_URLS_PATH: Path = DATA_DIR / "sample_urls.csv"
+# Local cache for downloaded threat-intelligence feeds (kept out of git).
+THREAT_CACHE_DIR: Path = DATA_DIR / "threat_cache"
+# Local persistence for the optional embedding vector index (kept out of git).
+VECTOR_CACHE_DIR: Path = DATA_DIR / "vector_cache"
+# Local output dir for optional multimodal screenshots (kept out of git).
+SCREENSHOT_DIR: Path = OUTPUTS_DIR / "screenshots"
 
 
 def _get_bool(name: str, default: bool = False) -> bool:
@@ -67,11 +73,16 @@ class Settings:
         default_factory=lambda: os.getenv("OPENAI_API_KEY", "").strip()
     )
     anthropic_model: str = field(
-        default_factory=lambda: os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest")
+        default_factory=lambda: os.getenv("ANTHROPIC_MODEL", "claude-opus-4-8")
     )
     openai_model: str = field(
         default_factory=lambda: os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     )
+    # LLM call safety limits (used only when USE_LLM=true and a key is present).
+    llm_timeout_seconds: int = field(
+        default_factory=lambda: _get_int("LLM_TIMEOUT_SECONDS", 20)
+    )
+    llm_max_tokens: int = field(default_factory=lambda: _get_int("LLM_MAX_TOKENS", 400))
 
     # Crawler safety settings.
     crawler_timeout_seconds: int = field(
@@ -86,9 +97,76 @@ class Settings:
             "phishing-rag-mvp-research-bot/0.1 (defensive-research; +local-prototype)",
         )
     )
+    # Fetch backend for live crawling: "requests" (default; bounded GET via httpx)
+    # or "playwright" (headless Chromium rendering). Falls back to "requests" if
+    # Playwright/Chromium is unavailable.
+    render_backend: str = field(
+        default_factory=lambda: os.getenv("RENDER_BACKEND", "requests").strip().lower()
+    )
+    render_timeout_seconds: int = field(
+        default_factory=lambda: _get_int("RENDER_TIMEOUT_SECONDS", 8)
+    )
+    # Dynamic-analysis (post-interaction cloaking detection) settings. Runs only
+    # with the playwright render backend on live pages. Clicking is OFF by
+    # default; when enabled, only a tight login/sign-in control is clicked.
+    dynamic_analysis_timeout_seconds: int = field(
+        default_factory=lambda: _get_int("DYNAMIC_ANALYSIS_TIMEOUT_SECONDS", 12)
+    )
+    click_login_button: bool = field(
+        default_factory=lambda: _get_bool("CLICK_LOGIN_BUTTON", False)
+    )
 
     # RAG settings.
     rag_top_k: int = 5
+    # Retriever backend: "tfidf" (default, zero heavy deps) or "embedding"
+    # (local sentence-transformer + Chroma; falls back to tfidf if unavailable).
+    retriever_backend: str = field(
+        default_factory=lambda: os.getenv("RETRIEVER_BACKEND", "tfidf").strip().lower()
+    )
+    embedding_model_name: str = field(
+        default_factory=lambda: os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2").strip()
+    )
+
+    # Optional multimodal (screenshot + OCR) stage. Off by default; needs a
+    # Playwright browser and an OCR engine (Tesseract). Falls back to skip if
+    # those are unavailable.
+    use_multimodal: bool = field(default_factory=lambda: _get_bool("USE_MULTIMODAL", False))
+    multimodal_timeout_seconds: int = field(
+        default_factory=lambda: _get_int("MULTIMODAL_TIMEOUT_SECONDS", 15)
+    )
+
+    # Threat-intelligence settings.
+    threat_intel_enabled: bool = field(
+        default_factory=lambda: _get_bool("THREAT_INTEL_ENABLED", True)
+    )
+    openphish_feed_url: str = field(
+        default_factory=lambda: os.getenv("OPENPHISH_FEED_URL", "https://openphish.com/feed.txt")
+    )
+    threat_cache_ttl_seconds: int = field(
+        default_factory=lambda: _get_int("THREAT_CACHE_TTL_SECONDS", 6 * 60 * 60)
+    )
+    phishtank_api_key: str = field(
+        default_factory=lambda: os.getenv("PHISHTANK_API_KEY", "").strip()
+    )
+    phishtank_check_url: str = field(
+        default_factory=lambda: os.getenv(
+            "PHISHTANK_CHECK_URL", "https://checkurl.phishtank.com/checkurl/"
+        )
+    )
+
+    # Domain-reputation (WHOIS / DNS / TLS) settings.
+    domain_intel_enabled: bool = field(
+        default_factory=lambda: _get_bool("DOMAIN_INTEL_ENABLED", True)
+    )
+    domain_intel_timeout_seconds: int = field(
+        default_factory=lambda: _get_int("DOMAIN_INTEL_TIMEOUT_SECONDS", 5)
+    )
+    new_domain_age_days: int = field(
+        default_factory=lambda: _get_int("NEW_DOMAIN_AGE_DAYS", 30)
+    )
+    # Optional local MaxMind GeoLite2 DB for ASN/geo (low-confidence signal).
+    # Empty -> geo lookups are skipped entirely (no network at all).
+    geoip_db_path: str = field(default_factory=lambda: os.getenv("GEOIP_DB_PATH", "").strip())
 
     def llm_is_available(self) -> bool:
         """Return True only if LLM use is enabled AND a relevant key exists."""
@@ -141,7 +219,7 @@ URL_SHORTENER_DOMAINS: List[str] = [
 KNOWN_BRANDS: dict[str, set[str]] = {
     "paypal": {"paypal.com"},
     "microsoft": {"microsoft.com", "microsoftonline.com", "office.com", "live.com"},
-    "office365": {"office.com", "microsoft.com"},
+    "office365": {"office.com", "microsoft.com", "office365.com"},
     "outlook": {"outlook.com", "microsoft.com", "live.com"},
     "google": {"google.com"},
     "gmail": {"google.com", "gmail.com"},
@@ -174,6 +252,16 @@ KNOWN_BRANDS: dict[str, set[str]] = {
     "spotify": {"spotify.com"},
     "roblox": {"roblox.com"},
     "tiktok": {"tiktok.com"},
+}
+
+# Free/consumer email providers. A registrant email at one of these is a weak
+# signal on its own, but a meaningful conflict when combined with a very new
+# domain or a brand-impersonating page (domain_intel conflict layer).
+FREE_EMAIL_PROVIDERS: set[str] = {
+    "gmail.com", "googlemail.com", "yahoo.com", "ymail.com", "hotmail.com",
+    "outlook.com", "live.com", "msn.com", "aol.com", "icloud.com", "me.com",
+    "protonmail.com", "proton.me", "gmx.com", "gmx.net", "mail.com", "zoho.com",
+    "yandex.com", "yandex.ru", "tutanota.com", "hushmail.com", "fastmail.com",
 }
 
 # TLDs disproportionately abused for phishing / free-registration abuse. Presence

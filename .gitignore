@@ -14,6 +14,19 @@ outputs/*.json
 outputs/*.md
 !outputs/.gitkeep
 
+# Cached threat-intelligence feeds (downloaded at runtime)
+data/threat_cache/
+
+# Persisted embedding vector index (rebuilt from knowledge_base.json)
+data/vector_cache/
+
+# Screenshots captured by the optional multimodal stage
+outputs/screenshots/
+
+# Evaluation datasets & results (contain live phishing URLs; regenerate locally)
+evaluation/data/
+evaluation/results/
+
 # IDE / OS
 .vscode/
 .idea/

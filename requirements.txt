@@ -2,16 +2,55 @@
 # Kept intentionally lightweight (no FAISS/Chroma/GPU/deep-learning libs yet).
 
 streamlit>=1.32,<2.0
+# httpx: used by the safe crawler AND for downloading threat-intel feeds
+# (OpenPhish / PhishTank). tldextract (below) is also reused by the threat-intel
+# module for registered-domain matching.
 httpx>=0.27,<1.0
 beautifulsoup4>=4.12,<5.0
 tldextract>=5.1,<6.0
+
+# Domain-reputation signals (WHOIS age/registrar/registrant, DNS A/MX records).
+# TLS uses stdlib ssl.
+python-whois>=0.9,<1.0
+dnspython>=2.4,<3.0
+
+# Optional: ASN / IP-geolocation for the domain_intel conflict layer (LOW-weight
+# geo signal). Needs a local MaxMind GeoLite2 DB via GEOIP_DB_PATH; skipped
+# entirely if absent. No network beyond the standard DNS resolution.
+# geoip2>=4.7,<6.0
 scikit-learn>=1.3,<2.0
 pandas>=2.0,<3.0
 numpy>=1.24,<3.0
 python-dotenv>=1.0,<2.0
+
+# Evaluation harness (evaluation/): plots for the metrics report.
+matplotlib>=3.8,<4.0
 
 # Testing
 pytest>=8.0,<9.0
 
 fastapi>=0.110.0,<1.0
 uvicorn>=0.29.0,<1.0
+
+# Optional: only needed when USE_LLM=true (LLM-backed explanation wording).
+# The project runs fully offline with a deterministic fallback without these.
+# anthropic>=0.40,<1.0   # for LLM_PROVIDER=anthropic
+# openai>=1.0,<2.0       # for LLM_PROVIDER=openai
+
+# Optional: only needed when RETRIEVER_BACKEND=embedding (local vector search).
+# Heavy dependencies; the default tfidf retriever needs none of these, and the
+# system falls back to tfidf automatically if they are absent.
+# sentence-transformers>=3.0,<6.0   # local MiniLM embeddings
+# chromadb>=0.5,<2.0                 # local persistent vector DB
+
+# Optional: headless-browser rendering. Needed for RENDER_BACKEND=playwright
+# (JS-rendered crawling) and/or USE_MULTIMODAL=true (screenshot + OCR).
+# Requires a SYSTEM step too: `playwright install chromium`. Both features are
+# off by default and fall back gracefully if Playwright/Chromium is missing.
+# playwright>=1.40,<2.0    # headless Chromium rendering
+
+# Optional: only needed when USE_MULTIMODAL=true (screenshot + OCR stage).
+# Also requires the Tesseract OCR SYSTEM binary:
+#   macOS: `brew install tesseract`  ·  Debian/Ubuntu: `apt-get install tesseract-ocr`
+# pytesseract>=0.3.10,<0.4 # Python wrapper for the Tesseract binary
+# Pillow>=10.0,<12.0       # image loading for OCR

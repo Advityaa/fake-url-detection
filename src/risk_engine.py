@@ -29,14 +29,30 @@ from .config import (
     action_recommendation,
     ui_label,
 )
+from .domain_intel import (
+    CONFLICT_BRAND_DOMAIN_MISMATCH,
+    CONFLICT_FREE_EMAIL_AND_NEW_DOMAIN,
+    CONFLICT_FREE_EMAIL_REGISTRANT,
+    CONFLICT_GEO_REGISTRANT_MISMATCH,
+    CONFLICT_IMPERSONATION_WEAK_CERT,
+    CONFLICT_VERY_NEW_DOMAIN,
+)
 from .schemas import (
     BrandCheckResult,
+    DomainIntelResult,
+    DynamicAnalysisResult,
     HTMLAnalysisResult,
+    MultimodalResult,
     PromptInjectionResult,
     RetrievedEvidence,
     RiskAssessmentResult,
+    ThreatIntelResult,
     URLFeatureResult,
 )
+
+# A domain at least this old (with a verified cert) earns the mild
+# "established domain" mitigation.
+ESTABLISHED_DOMAIN_AGE_DAYS = 365
 
 # Maps a knowledge-base category to the observed-indicator key that must be
 # present for that retrieved knowledge to contribute any risk.
@@ -92,6 +108,28 @@ WEIGHTS: Dict[str, int] = {
     # --- Hidden instructions (prompt injection) ---
     "injection_high": 35,
     "injection_other": 20,
+    # --- External threat intelligence (a confirmed feed hit is decisive) ---
+    "threat_intel_hit": 60,
+    # --- Domain reputation (WHOIS / DNS / TLS) ---
+    "new_domain": 25,           # registered less than NEW_DOMAIN_AGE_DAYS ago
+    "cert_invalid": 20,         # HTTPS cert fails verification / self-signed
+    "no_mx_with_suspicion": 5,  # no mail records, only alongside other signals
+    "established_domain": -10,  # old domain (>= 1 year) with a verified cert
+    # --- Visual / OCR (multimodal; conservative — no single signal reaches High) ---
+    "ocr_brand_in_image": 25,   # known brand rendered as image on a non-brand domain
+    "ocr_injection": 20,        # hidden instructions found in the screenshot's OCR text
+    "ocr_text_divergence": 8,   # rendered text weakly represented in the DOM (cloaking)
+    # --- Cross-signal conflicts (domain_intel conflict layer). Only the NOVEL
+    # combinations carry weight; conflicts already scored by another category
+    # (brand-domain mismatch, very-new-domain) are counted for explainability but
+    # scored 0 here to avoid double counting. Geo is low. Capped. ---
+    "conflict_free_email_and_new_domain": 25,
+    "conflict_impersonation_weak_cert": 15,
+    "conflict_free_email": 8,
+    "conflict_geo_mismatch": 3,
+    "conflict_cap": 35,
+    # --- Dynamic content (post-interaction cloaking; conservative, not High alone) ---
+    "dynamic_cloaking": 22,
     # --- Retrieved knowledge (conditional) ---
     "rag_per_indicator": 5,
     "rag_cap": 15,
@@ -243,6 +281,10 @@ def assess_risk(
     brand_check: Optional[BrandCheckResult] = None,
     is_trusted_domain: bool = False,
     redirect_count: int = 0,
+    threat_intel: Optional[ThreatIntelResult] = None,
+    domain_intel: Optional[DomainIntelResult] = None,
+    multimodal: Optional[MultimodalResult] = None,
+    dynamic: Optional[DynamicAnalysisResult] = None,
 ) -> RiskAssessmentResult:
     """Compute a transparent 0-100 risk score and classification.
 
@@ -266,6 +308,13 @@ def assess_risk(
     brand_pts = _score_brand(url_features, brand_check, risk_factors, safe_factors)
     html_pts = _score_html(html_analysis, indicators, risk_factors, safe_factors)
     injection_pts = _score_injection(prompt_injection, risk_factors)
+    threat_pts = _score_threat_intel(threat_intel, is_trusted_domain, risk_factors, safe_factors)
+    domain_pts = _score_domain_intel(
+        domain_intel, indicators, is_trusted_domain, risk_factors, safe_factors
+    )
+    multimodal_pts = _score_multimodal(multimodal, is_trusted_domain, risk_factors, safe_factors)
+    conflict_pts = _score_domain_conflicts(domain_intel, is_trusted_domain, risk_factors, safe_factors)
+    dynamic_pts = _score_dynamic(dynamic, is_trusted_domain, risk_factors, safe_factors)
 
     rag_points, rag_factors = score_rag_evidence_conditionally(retrieved_evidence, indicators)
     risk_factors.extend(rag_factors)
@@ -300,11 +349,19 @@ def assess_risk(
         "Brand / impersonation": brand_pts,
         "Page content": html_pts,
         "Hidden instructions": injection_pts,
+        "Threat intelligence": threat_pts,
+        "Domain reputation": domain_pts,
+        "Visual / OCR": multimodal_pts,
+        "Cross-signal conflicts": conflict_pts,
+        "Dynamic content": dynamic_pts,
         "Knowledge match": rag_points,
         "Trusted-domain mitigation": trusted_pts,
     }
 
-    raw_score = url_pts + brand_pts + html_pts + injection_pts + rag_points + trusted_pts
+    raw_score = (
+        url_pts + brand_pts + html_pts + injection_pts + threat_pts + domain_pts
+        + multimodal_pts + conflict_pts + dynamic_pts + rag_points + trusted_pts
+    )
     score = max(0, min(100, raw_score))
     classification = _classify(score)
     confidence = _confidence_label(score, risk_factors)
@@ -498,6 +555,245 @@ def _score_injection(r: PromptInjectionResult, risk: List[str]) -> int:
         f"Hidden-instruction (prompt-injection) content detected (severity: {r.severity}) [+{WEIGHTS['injection_other']}]."
     )
     return WEIGHTS["injection_other"]
+
+
+def _score_threat_intel(
+    threat: Optional[ThreatIntelResult],
+    is_trusted_domain: bool,
+    risk: List[str],
+    safe: List[str],
+) -> int:
+    """Score an external threat-feed hit (a strong signal), respecting the allowlist.
+
+    A confirmed hit is decisive, BUT a trusted-allowlist domain overrides it: feeds
+    carry false positives, so a stray entry for a well-known domain (e.g.
+    ``amazon.com``) must not flag it. Evidence-conditioned: no hit -> no points.
+    """
+    if threat is None or not threat.listed:
+        return 0
+    if is_trusted_domain:
+        safe.append(
+            f"URL/domain was found in a threat feed ({threat.source}), but the domain is on "
+            "the local trusted allowlist, so it was treated as a likely false positive and not scored."
+        )
+        return 0
+    risk.append(
+        f"Listed in a known phishing feed ({threat.source}: {threat.matched_value}) "
+        f"[+{WEIGHTS['threat_intel_hit']}]."
+    )
+    return WEIGHTS["threat_intel_hit"]
+
+
+def _score_domain_intel(
+    d: Optional[DomainIntelResult],
+    ind: Dict[str, bool],
+    is_trusted_domain: bool,
+    risk: List[str],
+    safe: List[str],
+) -> int:
+    """Score domain-reputation signals (WHOIS age / DNS / TLS).
+
+    Evidence-conditioned: only data that was actually retrieved is scored — an
+    unavailable lookup contributes nothing in either direction. Penalties are
+    suppressed for trusted-allowlist domains (mirroring the threat-intel rule),
+    while the mild "established domain" mitigation still applies.
+    """
+    if d is None or not d.checked:
+        return 0
+    points = 0
+
+    # Newly registered domain: a strong, well-documented phishing signal.
+    if d.whois_available and d.is_newly_registered:
+        if is_trusted_domain:
+            safe.append(
+                "WHOIS reports a very recent registration, but the domain is on the local "
+                "trusted allowlist, so it was treated as a likely data glitch and not scored."
+            )
+        else:
+            points += WEIGHTS["new_domain"]
+            risk.append(
+                f"Domain was registered only {d.domain_age_days} day(s) ago "
+                f"[+{WEIGHTS['new_domain']}]."
+            )
+
+    # Invalid / self-signed HTTPS certificate.
+    if d.tls_available and d.cert_currently_valid is False:
+        if is_trusted_domain:
+            safe.append(
+                "Certificate verification failed, but the domain is on the local trusted "
+                "allowlist; not scored (possible local TLS interception)."
+            )
+        else:
+            points += WEIGHTS["cert_invalid"]
+            kind = "self-signed" if d.cert_self_signed else "invalid/expired"
+            risk.append(f"HTTPS certificate is {kind} [+{WEIGHTS['cert_invalid']}].")
+
+    # Missing MX records: weak corroborating signal only.
+    if (
+        d.dns_available
+        and d.resolves
+        and d.has_mx is False
+        and ind.get("other_suspicious")
+        and not is_trusted_domain
+    ):
+        points += WEIGHTS["no_mx_with_suspicion"]
+        risk.append(
+            f"Domain has no mail (MX) records alongside other suspicious signals "
+            f"[+{WEIGHTS['no_mx_with_suspicion']}]."
+        )
+
+    # Established domain with a verified certificate: mild mitigation.
+    if (
+        d.whois_available
+        and d.domain_age_days is not None
+        and d.domain_age_days >= ESTABLISHED_DOMAIN_AGE_DAYS
+        and d.tls_available
+        and d.cert_currently_valid
+    ):
+        points += WEIGHTS["established_domain"]
+        years = d.domain_age_days // 365
+        safe.append(
+            f"Domain is well established (~{years} year(s) old) with a verified HTTPS "
+            f"certificate [{WEIGHTS['established_domain']}]."
+        )
+
+    return points
+
+
+def _score_multimodal(
+    m: Optional[MultimodalResult],
+    is_trusted_domain: bool,
+    risk: List[str],
+    safe: List[str],
+) -> int:
+    """Score the optional screenshot/OCR signals — conservatively.
+
+    Evidence-conditioned: only observed divergence/impersonation/injection adds
+    risk. Penalties are suppressed for trusted-allowlist domains (OCR is noisy).
+    Weights are deliberately capped so no single visual signal alone reaches the
+    High Risk band (>= 60).
+    """
+    if m is None or not m.available:
+        return 0
+    if is_trusted_domain:
+        if m.brand_in_image or m.text_divergence or m.injection_in_ocr:
+            safe.append(
+                "Visual/OCR signals were observed but not scored because the domain is on "
+                "the local trusted allowlist (guarding against OCR false positives)."
+            )
+        return 0
+
+    points = 0
+    if m.brand_in_image:
+        points += WEIGHTS["ocr_brand_in_image"]
+        risk.append(
+            f"Brand '{m.brand_in_image}' appears in the page screenshot but the domain "
+            f"is not that brand's — image-based brand impersonation [+{WEIGHTS['ocr_brand_in_image']}]."
+        )
+    if m.injection_in_ocr:
+        points += WEIGHTS["ocr_injection"]
+        risk.append(
+            f"Hidden-instruction text was found in the screenshot's OCR output "
+            f"(severity: {m.injection_severity}); treated as untrusted, never obeyed "
+            f"[+{WEIGHTS['ocr_injection']}]."
+        )
+    if m.text_divergence:
+        points += WEIGHTS["ocr_text_divergence"]
+        risk.append(
+            f"Rendered text diverges from the HTML text (possible cloaking) "
+            f"[+{WEIGHTS['ocr_text_divergence']}]."
+        )
+    return points
+
+
+def _score_domain_conflicts(
+    d: Optional[DomainIntelResult],
+    is_trusted_domain: bool,
+    risk: List[str],
+    safe: List[str],
+) -> int:
+    """Score the cross-signal conflict layer (domain_intel).
+
+    More conflicts -> more risk, but only the NOVEL combinations carry weight —
+    conflicts already scored by another category (brand-domain mismatch ->
+    Brand/impersonation, very-new-domain -> Domain reputation) are counted for
+    explainability but scored 0 here to avoid double counting. Geo is weighted
+    low, and ALL conflict scoring is suppressed for trusted-allowlist domains
+    (so a known-good site is never flagged on a geo mismatch alone).
+    """
+    if d is None or not d.checked or not d.conflicts:
+        return 0
+
+    names = set(d.conflicts)
+    if is_trusted_domain:
+        safe.append(
+            f"{d.conflict_count} cross-signal conflict(s) were observed but not scored "
+            "because the domain is on the local trusted allowlist."
+        )
+        return 0
+
+    points = 0
+    scored: List[str] = []
+    # The strong combo subsumes the plain free-email conflict — score one or the other.
+    if CONFLICT_FREE_EMAIL_AND_NEW_DOMAIN in names:
+        points += WEIGHTS["conflict_free_email_and_new_domain"]
+        scored.append("free-email registrant on a very new domain")
+    elif CONFLICT_FREE_EMAIL_REGISTRANT in names:
+        points += WEIGHTS["conflict_free_email"]
+        scored.append("free-email registrant")
+    if CONFLICT_IMPERSONATION_WEAK_CERT in names:
+        points += WEIGHTS["conflict_impersonation_weak_cert"]
+        scored.append("brand impersonation with a weak/anonymous certificate")
+    if CONFLICT_GEO_REGISTRANT_MISMATCH in names:
+        points += WEIGHTS["conflict_geo_mismatch"]
+        scored.append("hosting country differs from registrant country (low confidence)")
+
+    points = min(points, WEIGHTS["conflict_cap"])
+
+    if scored:
+        risk.append(
+            f"Cross-signal conflicts ({d.conflict_count}): " + "; ".join(scored)
+            + f" [+{points}]."
+        )
+    else:
+        # Only already-scored conflicts fired (e.g. brand mismatch / new domain).
+        already = [
+            n for n in (CONFLICT_BRAND_DOMAIN_MISMATCH, CONFLICT_VERY_NEW_DOMAIN) if n in names
+        ]
+        if already:
+            safe.append(
+                f"{d.conflict_count} cross-signal conflict(s) noted "
+                f"({', '.join(already)}); already reflected in other categories."
+            )
+    return points
+
+
+def _score_dynamic(
+    d: Optional[DynamicAnalysisResult],
+    is_trusted_domain: bool,
+    risk: List[str],
+    safe: List[str],
+) -> int:
+    """Score post-interaction cloaking (credential fields appearing after render).
+
+    Evidence-conditioned (only when cloaking was actually observed) and suppressed
+    for trusted-allowlist domains. Weighted conservatively so this signal alone
+    never reaches the High Risk band.
+    """
+    if d is None or not d.available or not d.cloaking_detected:
+        return 0
+    if is_trusted_domain:
+        safe.append(
+            "Content appeared only after interaction, but the domain is on the trusted "
+            "allowlist, so the dynamic-cloaking signal was not scored."
+        )
+        return 0
+    risk.append(
+        "Credential/form fields appeared only after page interaction (dynamic cloaking): "
+        + "; ".join(d.reasons)
+        + f" [+{WEIGHTS['dynamic_cloaking']}]."
+    )
+    return WEIGHTS["dynamic_cloaking"]
 
 
 # ---------------------------------------------------------------------------

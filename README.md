@@ -65,7 +65,6 @@ hits:
 
 ### Features intentionally NOT implemented yet (next 50%)
 
-- Multimodal screenshot analysis and OCR (only placeholder notes exist)
 - Real-time external threat-intelligence APIs (PhishTank / OpenPhish, etc.)
 - Automatic crawling of known-malicious sites
 - WHOIS / DNS / TLS / certificate intelligence
@@ -140,6 +139,89 @@ pytest
 # or, more verbose:
 pytest -v
 ```
+
+---
+
+## Optional: JS-rendering crawl backend (Playwright)
+
+By default the crawler fetches pages with a single bounded GET request (httpx).
+For sites that build their content with JavaScript, an **optional** headless
+Chromium backend can render the page first:
+
+```bash
+pip install playwright
+playwright install chromium     # required: downloads the browser
+```
+
+Then set in `.env`:
+
+```bash
+RENDER_BACKEND=playwright       # default is "requests"
+RENDER_TIMEOUT_SECONDS=8
+```
+
+Safety is preserved: navigation only (no form submission), downloads blocked,
+popups closed rather than followed, a hard timeout, and the browser context is
+always torn down. If Playwright or the Chromium binary is missing, the crawler
+logs a warning and **falls back to the requests backend automatically**, so the
+pipeline always runs end-to-end.
+
+### Dynamic-cloaking detection (piggybacks on the Playwright backend)
+
+When `RENDER_BACKEND=playwright`, live pages also get a **dynamic-analysis** pass
+that catches content revealed only *after* rendering/interaction — e.g. a login
+form or password field injected by JavaScript on scroll, a timer, or a click, so
+the initial HTML looks harmless. It snapshots credential-relevant DOM counts,
+does a minimal safe interaction (scroll in steps), snapshots again, and flags a
+material increase (the key case: a password field going 0 → 1).
+
+- **Clicking is off by default.** Set `CLICK_LOGIN_BUTTON=true` to also click a
+  control whose visible text tightly matches "log in / sign in"; cross-origin
+  navigations are reverted, never followed. Arbitrary buttons are never clicked.
+- Hard-timeout wrapped, browser always closed, and skipped gracefully if the
+  browser is unavailable. Its risk contribution is conservative — a cloaking
+  signal alone cannot reach *High Risk*, and it is suppressed for trusted domains.
+
+---
+
+## Optional: multimodal (screenshot + OCR) analysis
+
+An **optional, off-by-default** stage renders the page in a headless browser,
+OCRs the screenshot, and surfaces two signals the HTML-only path can miss:
+
+1. **Visible-vs-DOM text divergence** — text OCR sees rendered but that is weakly
+   present in the HTML (a hidden-text / cloaking indicator).
+2. **Brand-name-in-image** — a known brand shown in the screenshot while the
+   domain doesn't belong to that brand (logo/brand impersonation shipped as an
+   image to evade HTML brand analysis).
+
+All OCR text is treated as **untrusted** — it is scanned by the prompt-injection
+detector and never obeyed (attackers hide instructions as low-contrast/tiny image
+text specifically to hit the OCR channel). Rendering is GET-only navigation with a
+hard timeout, no downloads, and no form interaction.
+
+**This stage is disabled by default and requires extra dependencies** — both pip
+packages *and* system binaries:
+
+```bash
+pip install playwright pytesseract Pillow
+playwright install chromium          # downloads the headless browser
+# Tesseract OCR engine (system package):
+#   macOS:         brew install tesseract
+#   Debian/Ubuntu: sudo apt-get install tesseract-ocr
+```
+
+Then enable it in `.env`:
+
+```bash
+USE_MULTIMODAL=true
+```
+
+If any of these are missing, the stage logs a warning and is skipped — the
+pipeline still runs end-to-end. It only runs in **live** mode (it needs a real URL
+to render), and its risk contributions are **conservative**: no single visual
+signal alone can push a site to *High Risk*, and all visual signals are suppressed
+for trusted-allowlist domains.
 
 ---
 

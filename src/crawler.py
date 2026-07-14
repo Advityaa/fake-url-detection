@@ -14,6 +14,7 @@ offline, network-free demo mode. Live crawling is deliberately conservative.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import List, Optional
 
@@ -21,6 +22,8 @@ from bs4 import BeautifulSoup
 
 from .config import SAMPLE_HTML_DIR, settings
 from .schemas import CrawlResult
+
+logger = logging.getLogger(__name__)
 
 # Cap how much of a response body we will read (1.5 MB). Prevents downloading
 # large files and keeps the prototype responsive.
@@ -105,6 +108,38 @@ def crawl_sample(sample_key: str) -> CrawlResult:
         success=True,
         error=None,
     )
+
+
+def fetch_live(url: str, timeout: Optional[int] = None) -> CrawlResult:
+    """Fetch a live URL using the configured backend (``settings.render_backend``).
+
+    ``"playwright"`` renders the page with headless Chromium; if Playwright or the
+    Chromium binary is unavailable, a warning is logged and this transparently
+    falls back to the bounded GET :func:`crawl_url`. ``"requests"`` (default) uses
+    :func:`crawl_url` directly. Either way a :class:`CrawlResult` is returned and
+    the pipeline runs end-to-end.
+    """
+    if settings.render_backend == "playwright":
+        try:
+            from .browser_fetch import BrowserUnavailable, fetch_rendered
+
+            try:
+                return fetch_rendered(url, timeout)
+            except BrowserUnavailable as exc:
+                logger.warning(
+                    "Playwright render backend unavailable (%s); falling back to the "
+                    "requests crawler. Run `playwright install chromium` to enable it.",
+                    exc,
+                )
+        except Exception as exc:  # noqa: BLE001 - import/other failure -> safe fallback
+            logger.warning(
+                "Playwright render backend could not be loaded (%s); using the requests crawler.",
+                exc,
+            )
+    elif settings.render_backend != "requests":
+        logger.warning("Unknown RENDER_BACKEND %r; using the requests crawler.", settings.render_backend)
+
+    return crawl_url(url, timeout)
 
 
 def crawl_url(url: str, timeout: Optional[int] = None) -> CrawlResult:

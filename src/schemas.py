@@ -139,6 +139,144 @@ class RetrievedEvidence:
 
 
 @dataclass
+class ThreatIntelResult:
+    """Result of checking a URL/domain against external threat-intel feeds.
+
+    ``checked`` records whether any feed was actually consulted (so an offline
+    demo with no data is distinguishable from a genuine "not listed" result).
+    ``listed`` is the actual hit. ``source`` names the feed that matched.
+    """
+
+    checked: bool = False
+    listed: bool = False
+    source: str = ""  # matched feed, e.g. "OpenPhish" / "PhishTank" ("" if none)
+    sources_checked: List[str] = field(default_factory=list)
+    matched_value: str = ""  # the URL or domain that matched (for evidence)
+    confidence_note: str = ""
+    evidence_messages: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class DomainIntelResult:
+    """Domain-reputation signals: WHOIS age, DNS records, TLS certificate.
+
+    Each source carries its own ``*_available`` flag so the UI can honestly show
+    "data not available" when a lookup timed out or failed (WHOIS especially is
+    flaky). ``checked`` is False when domain intel was disabled or skipped.
+    """
+
+    checked: bool = False
+    domain: str = ""
+    # --- WHOIS ---
+    whois_available: bool = False
+    registrar: str = ""
+    domain_created: str = ""  # ISO date, e.g. "2019-05-04"
+    domain_age_days: Optional[int] = None
+    is_newly_registered: Optional[bool] = None  # age < configured threshold
+    registrant_country: str = ""
+    registrant_email: str = ""
+    # --- DNS ---
+    dns_available: bool = False
+    resolves: Optional[bool] = None  # has at least one A record
+    has_mx: Optional[bool] = None
+    # --- TLS (HTTPS URLs only) ---
+    tls_available: bool = False
+    cert_issuer: str = ""
+    cert_org: str = ""  # certificate SUBJECT organization (OV/EV only; DV = empty)
+    cert_valid_from: str = ""
+    cert_valid_until: str = ""
+    cert_currently_valid: Optional[bool] = None
+    cert_self_signed: Optional[bool] = None
+    # --- ASN / IP geolocation (OPTIONAL, LOW confidence) ---
+    asn_available: bool = False
+    ip_country: str = ""
+    asn_org: str = ""
+    # --- Cross-signal conflict layer (novel) ---
+    conflict_count: int = 0
+    conflicts: List[str] = field(default_factory=list)  # names of conflicts that fired
+    evidence_messages: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class MultimodalResult:
+    """Optional screenshot + OCR analysis of the rendered page.
+
+    ``checked`` is False when the stage was disabled/skipped; ``available`` is
+    True only when a screenshot was captured and OCR ran successfully. All OCR
+    text is treated as UNTRUSTED (scanned for prompt injection, never obeyed).
+    """
+
+    checked: bool = False
+    available: bool = False
+    screenshot_path: str = ""
+    ocr_char_count: int = 0
+    ocr_text_excerpt: str = ""  # bounded, untrusted — for evidence display only
+    # Signal 1: text OCR sees rendered but that is weakly present in the DOM text.
+    text_divergence: bool = False
+    divergence_ratio: float = 0.0
+    divergent_terms: List[str] = field(default_factory=list)
+    # Signal 2: a known brand name in the screenshot whose domain does not match.
+    brand_in_image: str = ""
+    # OCR is an injection surface ("Clouding the Mirror"): hidden instructions can
+    # be rendered as low-contrast/tiny image text. Detected, reported, never obeyed.
+    injection_in_ocr: bool = False
+    injection_severity: str = "low"
+    note: str = ""
+    evidence_messages: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class DomSnapshot:
+    """Counts of credential-relevant DOM elements at one point in time."""
+
+    forms: int = 0
+    inputs: int = 0
+    password_fields: int = 0
+    visible_password_fields: int = 0
+    hidden_inputs: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class DynamicAnalysisResult:
+    """Pre- vs post-interaction DOM diff, to catch content revealed only after
+    rendering/interaction (a deliberate cloaking technique static HTML misses).
+
+    ``checked`` is False when the stage was disabled/skipped; ``available`` is
+    True only when the page was rendered and both snapshots were taken.
+    """
+
+    checked: bool = False
+    available: bool = False
+    clicked_login: bool = False
+    pre: DomSnapshot = field(default_factory=DomSnapshot)
+    post: DomSnapshot = field(default_factory=DomSnapshot)
+    # ABSOLUTE deltas (the key case is 0 -> 1 password field appearing).
+    delta_forms: int = 0
+    delta_inputs: int = 0
+    delta_password_fields: int = 0
+    delta_visible_password_fields: int = 0
+    cloaking_detected: bool = False
+    reasons: List[str] = field(default_factory=list)
+    note: str = ""
+    evidence_messages: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class RiskAssessmentResult:
     """Output of the transparent rule-based risk engine."""
 
@@ -172,6 +310,10 @@ class FinalAnalysisResult:
     prompt_injection: PromptInjectionResult
     brand_check: Optional["BrandCheckResult"] = None
     is_trusted_domain: bool = False
+    threat_intel: Optional["ThreatIntelResult"] = None
+    domain_intel: Optional["DomainIntelResult"] = None
+    multimodal: Optional["MultimodalResult"] = None
+    dynamic_analysis: Optional["DynamicAnalysisResult"] = None
     retrieved_evidence: List[RetrievedEvidence] = field(default_factory=list)
     risk_assessment: Optional[RiskAssessmentResult] = None
     explanation: str = ""
@@ -191,6 +333,10 @@ class FinalAnalysisResult:
             "prompt_injection": self.prompt_injection.to_dict(),
             "brand_check": self.brand_check.to_dict() if self.brand_check else None,
             "is_trusted_domain": self.is_trusted_domain,
+            "threat_intel": self.threat_intel.to_dict() if self.threat_intel else None,
+            "domain_intel": self.domain_intel.to_dict() if self.domain_intel else None,
+            "multimodal": self.multimodal.to_dict() if self.multimodal else None,
+            "dynamic_analysis": self.dynamic_analysis.to_dict() if self.dynamic_analysis else None,
             "retrieved_evidence": [e.to_dict() for e in self.retrieved_evidence],
             "risk_assessment": (
                 self.risk_assessment.to_dict() if self.risk_assessment else None

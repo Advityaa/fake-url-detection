@@ -21,6 +21,25 @@ from .config import KNOWLEDGE_BASE_PATH, settings
 from .schemas import RetrievedEvidence
 
 
+def entry_to_evidence(entry: dict, index: int, score: float) -> RetrievedEvidence:
+    """Build a ``RetrievedEvidence`` from a knowledge-base entry and a score.
+
+    Shared by the TF-IDF and embedding retrievers so both produce identical
+    ``RetrievedEvidence`` objects (only the ``similarity_score`` scale differs).
+    """
+    return RetrievedEvidence(
+        id=str(entry.get("id", index)),
+        title=entry.get("title", ""),
+        category=entry.get("category", ""),
+        source_type=entry.get("source_type", ""),
+        trust_level=entry.get("trust_level", ""),
+        content=entry.get("content", ""),
+        indicators=entry.get("indicators", []) or [],
+        recommended_action=entry.get("recommended_action", ""),
+        similarity_score=round(float(score), 4),
+    )
+
+
 class RAGRetriever:
     """TF-IDF based retriever over a local JSON knowledge base."""
 
@@ -93,20 +112,7 @@ class RAGRetriever:
             score = float(scores[idx])
             if score <= 0.0:
                 continue
-            entry = self.entries[idx]
-            results.append(
-                RetrievedEvidence(
-                    id=str(entry.get("id", idx)),
-                    title=entry.get("title", ""),
-                    category=entry.get("category", ""),
-                    source_type=entry.get("source_type", ""),
-                    trust_level=entry.get("trust_level", ""),
-                    content=entry.get("content", ""),
-                    indicators=entry.get("indicators", []) or [],
-                    recommended_action=entry.get("recommended_action", ""),
-                    similarity_score=round(score, 4),
-                )
-            )
+            results.append(entry_to_evidence(self.entries[idx], idx, score))
         return results
 
 

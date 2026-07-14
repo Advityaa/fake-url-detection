@@ -4,6 +4,7 @@ import uvicorn
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.config import load_trusted_domains
+from src.embedding_retriever import build_retriever
 from src.pipeline import analyze_url
 from src.rag_retriever import RAGRetriever
 
@@ -25,7 +26,7 @@ _trusted_domains_instance = None
 def get_retriever() -> RAGRetriever:
     global _retriever_instance
     if _retriever_instance is None:
-        _retriever_instance = RAGRetriever()
+        _retriever_instance = build_retriever()  # backend from RETRIEVER_BACKEND
     return _retriever_instance
 
 

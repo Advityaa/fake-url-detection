@@ -1,0 +1,471 @@
+"""Run the evaluation over a dataset snapshot and produce honest metrics.
+
+Two configurations are reported from ONE network pass:
+
+  * **without threat intel** (headline): the pipeline runs with
+    ``enable_threat_intel=False`` — the OpenPhish feed that supplied the
+    phishing labels is NEVER consulted, so it cannot leak into the score.
+  * **with threat intel**: the pure ``assess_risk`` function is re-run on the
+    SAME collected evidence plus a cache-only feed check, which is exactly what
+    the production pipeline would have produced. This shows the feed's
+    contribution without a second crawl.
+
+Coverage honesty: URLs whose hostname does not resolve are skipped and counted;
+per-URL analysis errors are counted; WHOIS/DNS/TLS availability rates are
+reported (WHOIS throttles at scale).
+
+Usage:
+    python -m evaluation.run_evaluation [--dataset PATH] [--limit N]
+        [--workers 6] [--no-domain-intel] [--crawl-timeout 8]
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import traceback
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Dict, List, Optional
+from urllib.parse import urlparse
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from evaluation.metrics import (  # noqa: E402
+    BAND_PHISHING,
+    BAND_SUSPICIOUS,
+    summarize_bands,
+)
+from src.config import load_trusted_domains, settings  # noqa: E402
+from src.domain_intel import DomainIntelClient  # noqa: E402
+from src.pipeline import analyze_url  # noqa: E402
+from src.rag_retriever import RAGRetriever, build_query  # noqa: E402
+from src.risk_engine import assess_risk  # noqa: E402
+from src.threat_intel import ThreatIntelClient  # noqa: E402
+
+EVAL_DIR = Path(__file__).resolve().parent
+RESULTS_DIR = EVAL_DIR / "results"
+
+# Palette (validated with the dataviz six-checks script, light surface):
+# benign = categorical slot 1, phishing = categorical slot 6.
+COLOR_BENIGN = "#2a78d6"
+COLOR_PHISHING = "#e34948"
+INK = "#333333"
+INK_MUTED = "#767676"
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def _hostname(url: str) -> str:
+    if "://" not in url:
+        url = "https://" + url
+    return urlparse(url).hostname or ""
+
+
+def resolves(url: str, timeout: float = 3.0) -> bool:
+    """True if the URL's hostname has an A record (short-timeout DNS check)."""
+    import dns.resolver
+
+    host = _hostname(url)
+    if not host:
+        return False
+    resolver = dns.resolver.Resolver()
+    resolver.lifetime = timeout
+    resolver.timeout = timeout
+    try:
+        return len(resolver.resolve(host, "A")) > 0
+    except Exception:  # noqa: BLE001 - any failure counts as "did not resolve"
+        return False
+
+
+def analyze_one(
+    url: str,
+    label: int,
+    retriever: RAGRetriever,
+    trusted: List[str],
+    domain_client: Optional[DomainIntelClient],
+    ti_client: ThreatIntelClient,
+) -> Dict:
+    """Analyze one URL; return a record with both configs' scores/bands."""
+    record: Dict = {"url": url, "label": label}
+    try:
+        result = analyze_url(
+            url,
+            "live",
+            retriever=retriever,
+            trusted_domains=trusted,
+            domain_client=domain_client,
+            enable_threat_intel=False,  # leakage control (headline config)
+        )
+        if result is None:
+            record["error"] = "invalid URL"
+            return record
+
+        ra = result.risk_assessment
+        record.update(
+            {
+                "final_url": result.crawl.final_url,
+                "crawl_ok": result.crawl.success,
+                "score_no_ti": result.risk_score,
+                "band_no_ti": result.classification,
+                "breakdown_no_ti": ra.score_breakdown,
+                "risk_factors": ra.risk_factors[:6],
+                "whois_available": bool(result.domain_intel and result.domain_intel.whois_available),
+                "dns_available": bool(result.domain_intel and result.domain_intel.dns_available),
+                "tls_available": bool(result.domain_intel and result.domain_intel.tls_available),
+            }
+        )
+
+        # --- With-threat-intel config: cache-only feed check + pure re-score.
+        uf, ha, pi = result.url_features, result.html_analysis, result.prompt_injection
+        ti = ti_client.check(result.crawl.final_url or url, uf.registered_domain)
+        query = build_query(
+            uf.evidence_messages,
+            ha.evidence_messages,
+            pi.evidence_messages,
+            extra_terms=uf.suspicious_keywords_found
+            + ha.credential_patterns_found
+            + ti.evidence_messages
+            + (result.domain_intel.evidence_messages if result.domain_intel else []),
+        )
+        risk_ti = assess_risk(
+            uf,
+            ha,
+            pi,
+            retriever.retrieve(query),
+            brand_check=result.brand_check,
+            is_trusted_domain=result.is_trusted_domain,
+            redirect_count=len(result.crawl.redirect_chain),
+            threat_intel=ti,
+            domain_intel=result.domain_intel,
+        )
+        record.update(
+            {
+                "ti_listed": ti.listed,
+                "score_with_ti": risk_ti.score,
+                "band_with_ti": risk_ti.classification,
+            }
+        )
+    except Exception as exc:  # noqa: BLE001 - one bad URL must not kill the run
+        record["error"] = f"{type(exc).__name__}: {exc}"
+        record["traceback"] = traceback.format_exc(limit=2)
+    return record
+
+
+# ---------------------------------------------------------------------------
+# Plots (matplotlib, light surface; palette validated — see module constants)
+# ---------------------------------------------------------------------------
+def plot_confusion_matrices(cm_no_ti: Dict, cm_with_ti: Dict, out_path: Path) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(1, 2, figsize=(9, 4.2))
+    for ax, (title, cm) in zip(
+        axes,
+        [("Without threat intel", cm_no_ti), ("With threat intel", cm_with_ti)],
+    ):
+        grid = [[cm["tp"], cm["fn"]], [cm["fp"], cm["tn"]]]
+        vmax = max(1, max(max(row) for row in grid))
+        ax.imshow(grid, cmap="Blues", vmin=0, vmax=vmax)  # sequential single hue
+        for i in range(2):
+            for j in range(2):
+                value = grid[i][j]
+                ink = "#ffffff" if value > 0.6 * vmax else INK
+                ax.text(j, i, f"{value:,}", ha="center", va="center",
+                        fontsize=15, fontweight="bold", color=ink)
+        ax.set_xticks([0, 1], ["Phishing", "Benign"], color=INK)
+        ax.set_yticks([0, 1], ["Phishing", "Benign"], color=INK)
+        ax.set_xlabel("Predicted", color=INK_MUTED)
+        ax.set_ylabel("Actual", color=INK_MUTED)
+        ax.set_title(title, color=INK, fontsize=11)
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+    fig.suptitle("Confusion matrices — positive prediction = High Risk band",
+                 color=INK, fontsize=12)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=160, facecolor="white", bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_score_distribution(records: List[Dict], out_path: Path) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    benign = [r["score_no_ti"] for r in records if r["label"] == 0 and "score_no_ti" in r]
+    phish = [r["score_no_ti"] for r in records if r["label"] == 1 and "score_no_ti" in r]
+
+    fig, ax = plt.subplots(figsize=(9, 4.2))
+    bins = list(range(0, 105, 5))
+    ax.hist(benign, bins=bins, alpha=0.75, label=f"Benign (n={len(benign)})",
+            color=COLOR_BENIGN, edgecolor="white", linewidth=0.5)
+    ax.hist(phish, bins=bins, alpha=0.75, label=f"Phishing (n={len(phish)})",
+            color=COLOR_PHISHING, edgecolor="white", linewidth=0.5)
+    for x, name in [(30, "Needs Caution ≥30"), (60, "High Risk ≥60")]:
+        ax.axvline(x, color=INK_MUTED, linestyle="--", linewidth=1)
+        ax.text(x + 1, ax.get_ylim()[1] * 0.95, name, color=INK_MUTED,
+                fontsize=8, va="top")
+    ax.set_xlabel("Risk score (0–100, threat intel disabled)", color=INK)
+    ax.set_ylabel("URLs", color=INK)
+    ax.set_title("Score distribution by true class — without threat intel",
+                 color=INK, fontsize=12)
+    ax.legend(frameon=False)
+    ax.grid(axis="y", color="#e6e6e6", linewidth=0.6)
+    ax.set_axisbelow(True)
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=160, facecolor="white", bbox_inches="tight")
+    plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Report
+# ---------------------------------------------------------------------------
+def _fmt_metrics_table(metrics_by_config: Dict) -> str:
+    lines = [
+        "| Config | Positive = | Precision | Recall | F1 | Accuracy | FPR |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    pretty = {
+        "high_risk_positive": "High Risk only",
+        "caution_or_high_positive": "High Risk + Needs Caution",
+    }
+    for config, defs in metrics_by_config.items():
+        cfg_name = "without threat intel" if config == "no_threat_intel" else "WITH threat intel"
+        for def_key, m in defs.items():
+            lines.append(
+                f"| {cfg_name} | {pretty[def_key]} | {m['precision']:.3f} | "
+                f"{m['recall']:.3f} | {m['f1']:.3f} | {m['accuracy']:.3f} | "
+                f"{m['false_positive_rate']:.3f} |"
+            )
+    return "\n".join(lines)
+
+
+def _fmt_error_table(rows: List[Dict], score_key: str) -> str:
+    if not rows:
+        return "_None._"
+    lines = ["| URL | Score | Band | Top factors / breakdown |", "|---|---|---|---|"]
+    for r in rows:
+        factors = "; ".join(r.get("risk_factors", [])[:3]) or "—"
+        nonzero = {k: v for k, v in r.get("breakdown_no_ti", {}).items() if v}
+        url_short = (r["url"][:70] + "…") if len(r["url"]) > 70 else r["url"]
+        lines.append(
+            f"| `{url_short}` | {r.get(score_key, '?')} | {r.get('band_no_ti', '?')} "
+            f"| {factors} `{nonzero}` |"
+        )
+    return "\n".join(lines)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dataset", default=str(EVAL_DIR / "data" / "dataset_latest.json"))
+    parser.add_argument("--limit", type=int, default=0, help="cap per class (0 = all)")
+    parser.add_argument("--workers", type=int, default=6)
+    parser.add_argument("--no-domain-intel", action="store_true",
+                        help="skip WHOIS/DNS/TLS lookups (much faster)")
+    parser.add_argument("--crawl-timeout", type=int, default=0,
+                        help="override crawler timeout seconds")
+    args = parser.parse_args()
+
+    if args.crawl_timeout > 0:
+        settings.crawler_timeout_seconds = args.crawl_timeout
+
+    snapshot = json.loads(Path(args.dataset).read_text(encoding="utf-8"))
+    benign_urls = [it["url"] for it in snapshot["benign"]["items"]]
+    phish_urls = [it["url"] for it in snapshot["phishing"]["items"]]
+    if args.limit:
+        benign_urls = benign_urls[: args.limit]
+        phish_urls = phish_urls[: args.limit]
+
+    print(f"Dataset: {args.dataset} (created {snapshot['created_utc']})")
+    print(f"Candidates: {len(benign_urls)} benign, {len(phish_urls)} phishing")
+
+    # --- Resolution pre-check (skip dead URLs; count honestly) --------------
+    candidates = [(u, 0) for u in benign_urls] + [(u, 1) for u in phish_urls]
+    with ThreadPoolExecutor(max_workers=max(8, args.workers)) as pool:
+        resolved_flags = list(pool.map(lambda t: resolves(t[0]), candidates))
+    todo = [c for c, ok in zip(candidates, resolved_flags) if ok]
+    skipped = {
+        "benign": sum(1 for (u, lb), ok in zip(candidates, resolved_flags) if lb == 0 and not ok),
+        "phishing": sum(1 for (u, lb), ok in zip(candidates, resolved_flags) if lb == 1 and not ok),
+    }
+    print(f"Resolution: skipped {skipped['benign']} benign, {skipped['phishing']} phishing (no DNS)")
+
+    # --- Shared clients ------------------------------------------------------
+    retriever = RAGRetriever()
+    trusted = load_trusted_domains()
+    domain_client = DomainIntelClient(enabled=not args.no_domain_intel)
+    # Huge TTL: reuse the SAME cached feed the labels came from; never refresh
+    # mid-run (a refresh would silently change the with-TI hit rate).
+    ti_client = ThreatIntelClient(ttl_seconds=10**9)
+    ti_client.check("https://example.com/", "example.com")  # warm the feed once
+
+    # --- Analyze -------------------------------------------------------------
+    records: List[Dict] = []
+    done = 0
+    with ThreadPoolExecutor(max_workers=args.workers) as pool:
+        futures = [
+            pool.submit(analyze_one, u, lb, retriever, trusted, domain_client, ti_client)
+            for u, lb in todo
+        ]
+        for fut in futures:
+            records.append(fut.result())
+            done += 1
+            if done % 25 == 0 or done == len(futures):
+                print(f"  analyzed {done}/{len(futures)}")
+
+    ok = [r for r in records if "error" not in r]
+    errors = [r for r in records if "error" in r]
+    coverage = {
+        "benign": {
+            "sampled": len(benign_urls),
+            "skipped_unresolved": skipped["benign"],
+            "errors": sum(1 for r in errors if r["label"] == 0),
+            "analyzed": sum(1 for r in ok if r["label"] == 0),
+        },
+        "phishing": {
+            "sampled": len(phish_urls),
+            "skipped_unresolved": skipped["phishing"],
+            "errors": sum(1 for r in errors if r["label"] == 1),
+            "analyzed": sum(1 for r in ok if r["label"] == 1),
+        },
+    }
+
+    # --- Metrics (both configs, both positive definitions) ------------------
+    y_true = [r["label"] for r in ok]
+    metrics_by_config = {
+        "no_threat_intel": summarize_bands(y_true, [r["band_no_ti"] for r in ok]),
+        "with_threat_intel": summarize_bands(y_true, [r["band_with_ti"] for r in ok]),
+    }
+    n_analyzed = len(ok)
+    availability = {
+        "whois_pct": round(100 * sum(r["whois_available"] for r in ok) / n_analyzed, 1) if n_analyzed else 0,
+        "dns_pct": round(100 * sum(r["dns_available"] for r in ok) / n_analyzed, 1) if n_analyzed else 0,
+        "tls_pct": round(100 * sum(r["tls_available"] for r in ok) / n_analyzed, 1) if n_analyzed else 0,
+        "ti_feed_hit_rate_phishing_pct": round(
+            100 * sum(r["ti_listed"] for r in ok if r["label"] == 1)
+            / max(1, sum(1 for r in ok if r["label"] == 1)), 1),
+    }
+
+    # --- Error analysis ------------------------------------------------------
+    positive = {BAND_PHISHING}
+    fps = sorted(
+        (r for r in ok if r["label"] == 0 and r["band_no_ti"] in positive),
+        key=lambda r: -r["score_no_ti"],
+    )[:10]
+    fns = sorted(
+        (r for r in ok if r["label"] == 1 and r["band_no_ti"] not in positive),
+        key=lambda r: r["score_no_ti"],
+    )[:10]
+    rescued_by_ti = sum(
+        1 for r in ok
+        if r["label"] == 1 and r["band_no_ti"] not in positive and r["band_with_ti"] in positive
+    )
+
+    # --- Write outputs -------------------------------------------------------
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    run_meta = {
+        "run_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "dataset": {"path": str(args.dataset), "created_utc": snapshot["created_utc"],
+                    "seed": snapshot["seed"]},
+        "config": {
+            "limit_per_class": args.limit or None,
+            "workers": args.workers,
+            "domain_intel_enabled": not args.no_domain_intel,
+            "crawler_timeout_seconds": settings.crawler_timeout_seconds,
+            "threat_intel_in_pipeline": False,
+            "with_ti_config": "assess_risk re-scored on identical evidence + cache-only feed check",
+        },
+        "coverage": coverage,
+        "availability": availability,
+        "metrics": metrics_by_config,
+        "phishing_missed_without_ti_but_caught_with_ti": rescued_by_ti,
+        "worst_false_positives": fps,
+        "worst_false_negatives": fns,
+        "per_url": records,
+    }
+    json_path = RESULTS_DIR / f"results_{stamp}.json"
+    json_path.write_text(json.dumps(run_meta, indent=2, default=str), encoding="utf-8")
+
+    cm_path = RESULTS_DIR / f"confusion_matrices_{stamp}.png"
+    dist_path = RESULTS_DIR / f"score_distribution_{stamp}.png"
+    plot_confusion_matrices(
+        metrics_by_config["no_threat_intel"]["high_risk_positive"]["confusion"],
+        metrics_by_config["with_threat_intel"]["high_risk_positive"]["confusion"],
+        cm_path,
+    )
+    plot_score_distribution(ok, dist_path)
+
+    md = [
+        "# Evaluation report",
+        "",
+        f"- Run: {run_meta['run_utc']}  ·  Dataset: `{Path(args.dataset).name}` "
+        f"(created {snapshot['created_utc']}, seed {snapshot['seed']})",
+        f"- Benign source: {snapshot['benign']['source']}",
+        f"- Phishing source: {snapshot['phishing']['source']} "
+        f"(feed cached {snapshot['phishing'].get('feed_cached_at_utc')})",
+        "- **Leakage control:** the headline config runs the pipeline with threat-intel "
+        "lookups DISABLED, because the phishing labels come from that same feed. "
+        "The with-TI config re-scores identical evidence plus a cache-only feed check.",
+        "",
+        "## Coverage (honesty first)",
+        "",
+        f"| Class | Sampled | Skipped (no DNS) | Errors | Analyzed |",
+        f"|---|---|---|---|---|",
+        f"| Benign | {coverage['benign']['sampled']} | {coverage['benign']['skipped_unresolved']} "
+        f"| {coverage['benign']['errors']} | {coverage['benign']['analyzed']} |",
+        f"| Phishing | {coverage['phishing']['sampled']} | {coverage['phishing']['skipped_unresolved']} "
+        f"| {coverage['phishing']['errors']} | {coverage['phishing']['analyzed']} |",
+        "",
+        f"Signal availability on analyzed URLs: WHOIS {availability['whois_pct']}%, "
+        f"DNS {availability['dns_pct']}%, TLS {availability['tls_pct']}%. ",
+        f"Of analyzed phishing URLs, {availability['ti_feed_hit_rate_phishing_pct']}% were "
+        "(still) present in the cached feed at scoring time.",
+        "",
+        "## Metrics",
+        "",
+        _fmt_metrics_table(metrics_by_config),
+        "",
+        f"Phishing URLs missed without threat intel but caught with it: **{rescued_by_ti}**.",
+        "",
+        f"![Confusion matrices]({cm_path.name})",
+        f"![Score distribution]({dist_path.name})",
+        "",
+        "## Worst false positives (benign flagged High Risk, no-TI config)",
+        "",
+        _fmt_error_table(fps, "score_no_ti"),
+        "",
+        "## Worst false negatives (phishing NOT flagged High Risk, no-TI config)",
+        "",
+        _fmt_error_table(fns, "score_no_ti"),
+        "",
+        "## Limitations",
+        "",
+        "See `evaluation/README.md` — small sample, live feeds change daily, labels are "
+        "not manually verified, non-resolving URLs are excluded from metrics, and the "
+        "benign class (popular sites) is easier than hard negatives would be.",
+        "",
+    ]
+    md_path = RESULTS_DIR / f"report_{stamp}.md"
+    md_path.write_text("\n".join(md), encoding="utf-8")
+
+    print("\n=== Results ===")
+    for config, defs in metrics_by_config.items():
+        m = defs["high_risk_positive"]
+        print(f"{config:>18} (High Risk +): precision {m['precision']:.3f}  "
+              f"recall {m['recall']:.3f}  F1 {m['f1']:.3f}  acc {m['accuracy']:.3f}")
+    print(f"Saved: {json_path}\n       {md_path}\n       {cm_path}\n       {dist_path}")
+
+
+if __name__ == "__main__":
+    main()

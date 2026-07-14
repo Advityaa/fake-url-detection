@@ -1,13 +1,3 @@
-"""Streamlit UI for the Fake Website Safety Checker (50% MVP).
-
-Run with:  streamlit run app.py
-
-This 50% MVP lets a user check a website by live (safe) crawling or by loading
-one of the bundled sample pages. It shows a plain-English safety result, a risk
-score, the reasons behind the result, retrieved security knowledge, a hidden
-instruction (prompt-injection) check, and an explanation, and can export
-JSON / Markdown reports.
-"""
 
 from __future__ import annotations
 
@@ -16,6 +6,7 @@ from typing import Optional
 import streamlit as st
 
 from src.config import OUTPUTS_DIR, load_trusted_domains, settings
+from src.embedding_retriever import build_retriever
 from src.pipeline import analyze_url
 from src.rag_retriever import RAGRetriever
 from src.report_generator import build_markdown_report, save_json_report, save_markdown_report
@@ -26,7 +17,8 @@ MVP_LIMITATIONS = [
     "Research prototype only - not a production security control.",
     "Rule-based scoring uses weak lexical/structural signals; false positives and negatives are still possible.",
     "The trusted-domain allowlist is a small local demo signal, not a security guarantee.",
-    "No WHOIS/DNS/TLS, no live threat-intelligence feeds, and no screenshot/OCR analysis yet.",
+    "WHOIS/DNS/TLS and threat-feed lookups depend on network availability and may report 'data not available'.",
+    "No screenshot/OCR analysis yet.",
     "LLM explanation is optional and disabled by default; a deterministic fallback is used.",
     "Webpage content is treated as untrusted evidence and is never executed or obeyed.",
 ]
@@ -38,13 +30,14 @@ COMPLETED_MODULES = [
     "Local RAG retrieval",
     "Risk scoring",
     "Basic hidden instruction detection",
+    "Threat-intelligence feeds (OpenPhish / PhishTank)",
+    "WHOIS / DNS / TLS domain reputation",
     "Report generation",
 ]
 
 PENDING_MODULES = [
     "OCR screenshot analysis",
-    "Live threat-intelligence APIs",
-    "WHOIS / DNS / TLS checks",
+    "LLM-based classification/explanation",
     "Larger dataset evaluation",
     "Full final report metrics",
 ]
@@ -61,8 +54,8 @@ _STATUS_STYLE = {
 # ---------------------------------------------------------------------------
 @st.cache_resource(show_spinner=False)
 def get_retriever() -> RAGRetriever:
-    """Build (and cache) the RAG retriever once per session."""
-    return RAGRetriever()
+    """Build (and cache) the RAG retriever once per session (backend from config)."""
+    return build_retriever()
 
 
 @st.cache_resource(show_spinner=False)
@@ -99,7 +92,7 @@ def analyze(url: str, mode: str) -> Optional[FinalAnalysisResult]:
 def render_sidebar() -> None:
     with st.sidebar:
         st.header("Prototype status")
-        st.progress(0.5, text="Current prototype completion: 50%")
+        st.progress(0.65, text="Current prototype completion: 65%")
 
         st.subheader("Completed")
         for module in COMPLETED_MODULES:
