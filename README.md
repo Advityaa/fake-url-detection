@@ -1,48 +1,80 @@
 # Evidence-Grounded Fake URL / Phishing Website Detection using LLMs and RAG
 
-A **50% MVP research prototype** for a college progress report. The system lets a
-user enter a suspicious URL and returns an **evidence-grounded** classification
-(*Likely Benign / Suspicious / Likely Phishing*), a 0–100 risk score, the
-supporting evidence, retrieved security knowledge (lightweight RAG), and a
+A **defensive research prototype** for a college project. The system lets a user
+enter a suspicious URL and returns an **evidence-grounded** classification
+(*Likely Benign / Suspicious / Likely Phishing*), a transparent 0–100 risk score
+with a **per-category breakdown**, the supporting evidence, retrieved security
+knowledge (RAG), external **threat-** and **domain-intelligence** signals, and a
 readable explanation.
 
 > ⚠️ **This is a defensive research prototype, not a production security tool.**
-> It uses weak lexical/structural signals and a transparent rule-based score.
-> Treat results as decision support, not a definitive verdict. Sample data uses
-> only fictional brands and domains.
+> Classification comes from a **transparent rule-based engine, not a trained
+> ML/LLM model**. Treat results as decision support, not a definitive verdict.
+> Bundled demo data uses only fictional brands and domains.
 
 ---
 
-## Current MVP Scope (≈ 50%)
+## Status (feature by feature)
 
-This prototype implements the first half of the project: URL feature
-extraction, a safe crawler, HTML analysis, prompt-injection detection, a local
-TF-IDF RAG retriever, a rule-based risk engine, an explainer with a
-deterministic fallback, a Streamlit UI, and report export.
+Status is tracked by capability below rather than as one headline number — a
+single percentage would hide what actually runs **by default** vs. what is
+**available but disabled**. By count, roughly **19 of ~24 planned capabilities are
+implemented (~79%)**: 11 run by default, 8 are implemented but disabled in the
+default config, and ~5 remain as genuine future work.
 
-### Features implemented
+### 1. Implemented — ON by default
 
-1. URL input and validation
-2. **HTTPS-first** URL normalization and lexical feature extraction
-3. Safe webpage crawler (GET-only, bounded, no form submission, HTTP fallback)
-4. HTML / visible-text extraction and analysis
-5. Form and password-field detection
-6. Prompt-injection ("hidden instruction") detection over visible **and hidden** content
-7. **Brand-domain matching** (match reduces risk, mismatch increases it)
-8. **Brand impersonation in the URL itself** (e.g. `paypal.secure-login.example.net`,
-   `paypalsecure.com`) — detected even when the page does not load
-9. **Lookalike / typosquat detection** (leetspeak `paypa1`→paypal, `g00gle`→google,
-   plus edit-distance typos) and **suspicious-TLD** scoring (`.tk`, `.xyz`, `.zip`, …)
-10. **Local trusted-domain allowlist** (MVP demo signal, not a guarantee)
-11. Lightweight local RAG using a JSON knowledge base + TF-IDF similarity
-12. Transparent rule-based risk scoring (0–100) with **evidence-conditioned RAG**,
-    centralized weights, and a per-category **score breakdown**
-13. Optional LLM explanation module with a deterministic, non-technical fallback
-14. **Two front-ends over one shared pipeline** (`src/pipeline.py`): a Streamlit
-    app and a React (Sentinel) + FastAPI app
-15. JSON / Markdown analysis report export
-16. Unit tests for the core modules
-17. This README and `progress_report.md`
+1. URL input/validation and **HTTPS-first** lexical analysis: length, subdomains,
+   IP/`@`/punycode, link shorteners, hostname entropy, **suspicious TLDs**,
+   host-vs-path keyword weighting, **brand impersonation in the URL**
+   (`paypal.secure-login.example.net`), and **lookalike/typosquat** detection
+   (leetspeak `paypa1`→paypal, plus edit-distance typos).
+2. **Safe crawler** — GET-only, bounded timeout/redirects, capped response size,
+   non-HTML skipped, no JavaScript execution, no form submission (httpx
+   "requests" backend), plus an offline sample-page mode.
+3. **HTML / visible-text analysis** — forms, password fields, credential-request
+   language, external links/scripts, brand-like words; brand-vs-domain matching.
+4. **Prompt-injection detection** over visible *and* hidden content, with severity.
+5. **TF-IDF RAG retrieval** over a local 22-entry knowledge base (evidence-
+   conditioned: retrieved knowledge adds risk only when a matching indicator was
+   actually observed).
+6. **Threat intelligence — OpenPhish feed** (downloaded, cached with a TTL,
+   offline-safe; matched by URL / host / registered domain).
+7. **Domain intelligence — WHOIS** (age, registrar, registrant), **DNS** (A/MX),
+   **TLS** (issuer/org/validity/self-signed), plus a **cross-signal conflict
+   layer** that tallies contradictions across these signals.
+8. **Transparent rule-based risk engine** (0–100) with centralized weights, an
+   **11-category per-category score breakdown**, evidence-conditioning, and a
+   local **trusted-domain allowlist** mitigation (suppressed for severe risks).
+9. **Evidence-grounded explanation** (deterministic; cites the factors used).
+10. **Two front-ends over one shared pipeline** (`src/pipeline.py`): a Streamlit
+    app and a React ("Sentinel") + FastAPI app; JSON/Markdown report export.
+11. **Test suite** (175 passing / 4 skipped) and a **reproducible evaluation
+    harness** (`evaluation/`).
+
+### 2. Implemented — available but DISABLED in the default config
+
+Built and tested, but **off by default** so the core runs offline with no heavy or
+system dependencies. Each notes why it is off / how to enable it:
+
+- **LLM explanation** — `USE_LLM=false`. Wording-only: it rephrases the
+  explanation and **never changes the score or verdict** (those stay with the rule
+  engine). Needs a provider API key + SDK (`anthropic`/`openai`).
+- **Embedding RAG** (sentence-transformers + Chroma) — `RETRIEVER_BACKEND=tfidf`;
+  optional heavy deps; **auto-falls-back to TF-IDF** if unavailable.
+- **Playwright render backend** (headless Chromium) — `RENDER_BACKEND=requests`;
+  needs `pip install playwright && playwright install chromium`.
+- **Multimodal (screenshot + OCR)** — `USE_MULTIMODAL=false`; needs Playwright and
+  the Tesseract binary.
+- **Dynamic-analysis** (post-interaction cloaking diff) — runs only with the
+  Playwright backend, so off by default.
+- **Login-click during dynamic analysis** — `CLICK_LOGIN_BUTTON=false`.
+- **Geo/ASN conflict type** — needs `GEOIP_DB_PATH` + `geoip2`. **Inactive in the
+  default setup, so this specific conflict never fires by default** (the other
+  conflict types — brand-vs-domain, free-email registrant, free-email+new-domain,
+  impersonation-with-weak-cert — do run).
+- **PhishTank feed** — needs an API key; **OpenPhish is the feed that actually
+  runs** by default.
 
 ### False-positive calibration (added after an `amazon.com` test)
 
@@ -63,17 +95,29 @@ hits:
   "Needs Caution" on its own; it is ignored for trusted domains.
 - **Classification bands**: 0–29 Likely Safe · 30–59 Needs Caution · 60–100 High Risk.
 
-### Features intentionally NOT implemented yet (next 50%)
+### 3. Genuine future work (not yet built)
 
-- Real-time external threat-intelligence APIs (PhishTank / OpenPhish, etc.)
-- Automatic crawling of known-malicious sites
-- WHOIS / DNS / TLS / certificate intelligence
-- Browser-extension deployment
-- Multi-agent LLM debate
-- Trained deep-learning models / GPU dependencies
-- Large-scale labelled evaluation with reported accuracy/metrics
+- A **trained ML / deep-learning** classifier (the current classifier is the
+  transparent rule engine, by design).
+- **LLM-backed classification** (today the LLM is wording-only, not a classifier).
+- **Large-scale labelled evaluation** with published metrics / error analysis (the
+  harness exists and runs, but on small samples).
+- **Browser-extension** front-end and deployment.
+- Multi-agent LLM debate.
 
-No final accuracy or research results are claimed.
+### Scoping facts (stated plainly)
+
+- The classifier is a **transparent rule engine, not a trained ML/LLM model**.
+- **RAG is real** (TF-IDF by default; embeddings optional).
+- **No accuracy is claimed in the app itself.** The `evaluation/` harness measures
+  it separately and honestly. On a seeded 300 + 300 Tranco-vs-OpenPhish sample,
+  URL/HTML/domain signals **alone** (threat-intel disabled to prevent label
+  leakage) are high-precision but **low-recall** (≈0.92 precision / 0.25 recall /
+  0.40 F1); with the threat-intel feed enabled, ≈0.97 / 0.89 / 0.93. The low
+  URL-only recall is a real limitation, stated rather than hidden.
+- Bundled data is **demo data, not mock**: `data/sample_html/*`, `sample_urls.csv`,
+  `trusted_domains.json` (small local allowlist), and `knowledge_base.json` (22
+  curated RAG entries). Live modes use real network sources.
 
 ---
 
@@ -315,12 +359,11 @@ for trusted-allowlist domains.
 
 ---
 
-## Future work (planned for the remaining 50%)
+## Future work
 
-- Screenshot capture + OCR (multimodal evidence).
-- Live threat-intelligence / blocklist lookups.
-- WHOIS / DNS / TLS certificate signals (e.g. domain age).
-- Stronger prompt-injection defenses and input sanitisation for the LLM path.
-- A labelled evaluation set with proper metrics and error analysis.
-- A real LLM-backed explanation (Anthropic Claude / OpenAI) behind `USE_LLM=true`.
-- Optional browser-extension front-end and deployment.
+See **"Status → 3. Genuine future work"** above for the authoritative list. In
+short: a trained ML classifier, LLM-backed *classification* (not just wording),
+large-scale labelled evaluation, a browser-extension front-end, and multi-agent
+LLM debate. The threat-intelligence, WHOIS/DNS/TLS, screenshot/OCR, and
+LLM-explanation items from earlier drafts of this README are **now implemented**
+(the last three are available but disabled in the default config).
