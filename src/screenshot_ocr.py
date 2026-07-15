@@ -126,6 +126,10 @@ def run_ocr(image_path: Path) -> str:
     import pytesseract  # lazy: needs the system `tesseract` binary
     from PIL import Image
 
+    # Point pytesseract at an explicit binary if configured (e.g. conda install).
+    if settings.tesseract_cmd:
+        pytesseract.pytesseract.tesseract_cmd = settings.tesseract_cmd
+
     with Image.open(image_path) as img:
         return pytesseract.image_to_string(img) or ""
 

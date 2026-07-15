@@ -134,6 +134,9 @@ class Settings:
     multimodal_timeout_seconds: int = field(
         default_factory=lambda: _get_int("MULTIMODAL_TIMEOUT_SECONDS", 15)
     )
+    # Explicit path to the Tesseract binary (e.g. a conda-forge install not on
+    # PATH). Empty -> pytesseract uses "tesseract" from PATH.
+    tesseract_cmd: str = field(default_factory=lambda: os.getenv("TESSERACT_CMD", "").strip())
 
     # Threat-intelligence settings.
     threat_intel_enabled: bool = field(
