@@ -35,6 +35,17 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from evaluation.llm_baseline import (  # noqa: E402
+    PROMPT_VERSION,
+    SYSTEM_INSTRUCTION,
+    VARIANT_URL_AND_TEXT,
+    VARIANT_URL_ONLY,
+    NaiveLLMBaseline,
+    baseline_available,
+    build_comparison,
+    build_prompt,
+    find_disagreements,
+)
 from evaluation.metrics import (  # noqa: E402
     BAND_PHISHING,
     BAND_SUSPICIOUS,
@@ -90,8 +101,14 @@ def analyze_one(
     trusted: List[str],
     domain_client: Optional[DomainIntelClient],
     ti_client: ThreatIntelClient,
+    capture_text: bool = False,
 ) -> Dict:
-    """Analyze one URL; return a record with both configs' scores/bands."""
+    """Analyze one URL; return a record with both configs' scores/bands.
+
+    When ``capture_text`` is True, a bounded excerpt of the fetched visible page
+    text is stored so the raw-LLM baseline's url_and_text variant can reuse it
+    without a second fetch.
+    """
     record: Dict = {"url": url, "label": label}
     try:
         result = analyze_url(
@@ -115,11 +132,16 @@ def analyze_one(
                 "band_no_ti": result.classification,
                 "breakdown_no_ti": ra.score_breakdown,
                 "risk_factors": ra.risk_factors[:6],
+                # Injection flag: used by the baseline's disagreement analysis to
+                # surface the cloaking/injection cases the raw LLM cannot see.
+                "injection_detected": bool(result.prompt_injection.injection_detected),
                 "whois_available": bool(result.domain_intel and result.domain_intel.whois_available),
                 "dns_available": bool(result.domain_intel and result.domain_intel.dns_available),
                 "tls_available": bool(result.domain_intel and result.domain_intel.tls_available),
             }
         )
+        if capture_text:
+            record["visible_text_excerpt"] = (result.crawl.visible_text or "")[:2000]
 
         # --- With-threat-intel config: cache-only feed check + pure re-score.
         uf, ha, pi = result.url_features, result.html_analysis, result.prompt_injection
@@ -265,6 +287,201 @@ def _fmt_error_table(rows: List[Dict], score_key: str) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Raw-LLM baseline ("why not just ask an LLM?")
+# ---------------------------------------------------------------------------
+def _pipeline_pred(record: Dict, band_key: str) -> int:
+    """Binary phishing prediction from a pipeline band (positive = High Risk)."""
+    return 1 if record.get(band_key) == BAND_PHISHING else 0
+
+
+def _select_baseline_targets(ok: List[Dict], limit: int) -> List[Dict]:
+    """Pick the URLs to send to the baseline (balanced per class when capped)."""
+    if not limit or limit <= 0:
+        return ok
+    per_class = max(1, limit // 2)
+    benign = [r for r in ok if r["label"] == 0][:per_class]
+    phish = [r for r in ok if r["label"] == 1][:per_class]
+    return benign + phish
+
+
+def _run_baseline_variant(
+    variant: str, targets: List[Dict], model: str, min_interval: float
+) -> Dict:
+    """Run one baseline variant over the target URLs; return a report block."""
+    urls = [r["url"] for r in targets]
+    page_texts = None
+    if variant == VARIANT_URL_AND_TEXT:
+        page_texts = [r.get("visible_text_excerpt") or None for r in targets]
+
+    baseline = NaiveLLMBaseline(model=model, min_interval=min_interval)
+    print(f"  baseline [{variant}]: {len(urls)} URLs "
+          f"(min interval {min_interval:.1f}s; cached responses reused)")
+
+    def _progress(done: int, total: int) -> None:
+        print(f"    baseline {variant}: {done}/{total} "
+              f"(api calls {baseline.calls_made}, cache hits {baseline.cache_hits})")
+
+    results = baseline.run(urls, page_texts=page_texts, progress=_progress)
+    by_url = {res.url: res for res in results}
+
+    common_rows: List[Dict] = []       # predictions for metrics (identical set)
+    disagreement_rows: List[Dict] = []  # for the disagreement table
+    n_errors = 0
+    for r in targets:
+        res = by_url.get(r["url"])
+        if res is None or res.is_phishing is None:
+            n_errors += 1
+            continue
+        base_pred = 1 if res.is_phishing else 0
+        pipe_pred = _pipeline_pred(r, "band_no_ti")
+        common_rows.append({
+            "label": r["label"],
+            "base_pred": base_pred,
+            "pipe_no_ti_pred": pipe_pred,
+            "pipe_with_ti_pred": _pipeline_pred(r, "band_with_ti"),
+        })
+        disagreement_rows.append({
+            "url": r["url"], "label": r["label"],
+            "base_pred": base_pred, "base_reason": res.reason,
+            "pipe_pred": pipe_pred, "pipe_band": r.get("band_no_ti", "?"),
+            "pipe_score": r.get("score_no_ti", "?"),
+            "injection_detected": bool(r.get("injection_detected")),
+        })
+
+    disagreements = find_disagreements(disagreement_rows)
+    return {
+        "variant": variant,
+        "n_targets": len(targets),
+        "n_predicted": len(common_rows),
+        "n_errors": n_errors,
+        "calls_made": baseline.calls_made,
+        "cache_hits": baseline.cache_hits,
+        "comparison": build_comparison(common_rows) if common_rows else None,
+        "n_disagreements": len(disagreements),
+        "disagreements": disagreements[:25],
+    }
+
+
+def run_llm_baseline(ok: List[Dict], args: argparse.Namespace) -> Optional[Dict]:
+    """Run the raw-LLM baseline if requested; return a report block or None.
+
+    Never raises for a missing key: it reports a clean "skipped" block instead.
+    """
+    if not args.llm_baseline:
+        return None
+    if not baseline_available():
+        print("LLM baseline requested but no API key configured -> skipping cleanly.")
+        return {"status": "skipped_no_key", "note": "baseline not run (no API key)"}
+    if not ok:
+        return {"status": "skipped_no_data", "note": "baseline not run (no analyzed URLs)"}
+
+    targets = _select_baseline_targets(ok, args.llm_baseline_limit)
+    variants = (
+        [VARIANT_URL_ONLY, VARIANT_URL_AND_TEXT]
+        if args.llm_baseline_variant == "both"
+        else [args.llm_baseline_variant]
+    )
+    print(f"\n=== Raw-LLM baseline (model {args.llm_model}) ===")
+    variant_blocks = [
+        _run_baseline_variant(v, targets, args.llm_model, args.llm_min_interval)
+        for v in variants
+    ]
+    from evaluation.llm_baseline import DEFAULT_CACHE_PATH
+    return {
+        "status": "ok",
+        "model": args.llm_model,
+        "prompt_version": PROMPT_VERSION,
+        "system_instruction": SYSTEM_INSTRUCTION,
+        "prompt_example_url_only": build_prompt("http://example-login.example.net/verify"),
+        "min_interval_seconds": args.llm_min_interval,
+        "cache_path": str(DEFAULT_CACHE_PATH),
+        "variants": variant_blocks,
+    }
+
+
+def _fmt_comparison_table(comp: Dict) -> str:
+    order = [
+        ("raw_llm_baseline", "Raw-LLM baseline"),
+        ("pipeline_no_threat_intel", "Full pipeline (no threat intel)"),
+        ("pipeline_with_threat_intel", "Full pipeline (with threat intel)"),
+    ]
+    lines = [
+        "| Approach | Precision | Recall | F1 | Accuracy | FPR | n |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for key, name in order:
+        m = comp[key]
+        lines.append(
+            f"| {name} | {m['precision']:.3f} | {m['recall']:.3f} | {m['f1']:.3f} "
+            f"| {m['accuracy']:.3f} | {m['false_positive_rate']:.3f} | {comp['n']} |"
+        )
+    return "\n".join(lines)
+
+
+def _fmt_disagreement_table(rows: List[Dict]) -> str:
+    if not rows:
+        return "_No disagreements._"
+    lines = [
+        "| URL | True | Baseline | Pipeline (no-TI) | Injection flagged |",
+        "|---|---|---|---|---|",
+    ]
+    lab = {0: "benign", 1: "phishing"}
+    pred = {0: "legit", 1: "phishing"}
+    for r in rows:
+        url_short = (r["url"][:60] + "…") if len(r["url"]) > 60 else r["url"]
+        reason = (r.get("base_reason") or "").replace("|", "/").replace("\n", " ")[:80]
+        lines.append(
+            f"| `{url_short}` | {lab[r['label']]} | {pred[r['base_pred']]} ({reason}) "
+            f"| {r['pipe_band']} ({r['pipe_score']}) "
+            f"| {'yes' if r['injection_detected'] else 'no'} |"
+        )
+    return "\n".join(lines)
+
+
+def _fmt_baseline_section(block: Optional[Dict]) -> List[str]:
+    if block is None:
+        return []  # baseline not requested -> no section at all
+    md = ['## Raw-LLM baseline — "why not just ask an LLM?"', ""]
+    if block.get("status") != "ok":
+        return md + [f"_{block.get('note', 'baseline not run')}._", ""]
+    md += [
+        f"Naive baseline: for each URL, ask **{block['model']}** for a JSON phishing "
+        "verdict using the same fair, minimal prompt a non-expert user would type "
+        "(documented in `evaluation/README.md`). Run on the SAME analyzed URLs as the "
+        "pipeline; responses are cached and rate-limited so re-runs don't re-spend quota.",
+        "",
+    ]
+    for vb in block["variants"]:
+        title = "URL only" if vb["variant"] == VARIANT_URL_ONLY else "URL + fetched page text"
+        md += [f"### Variant: {title}", ""]
+        if not vb.get("comparison"):
+            md += [f"_No parseable predictions (targets {vb['n_targets']}, "
+                   f"errors {vb['n_errors']})._", ""]
+            continue
+        md += [
+            f"Compared on **{vb['comparison']['n']}** URLs (targets {vb['n_targets']}, "
+            f"baseline errors/unparseable {vb['n_errors']}, API calls {vb['calls_made']}, "
+            f"cache hits {vb['cache_hits']}).",
+            "",
+            _fmt_comparison_table(vb["comparison"]),
+            "",
+            f"**Baseline vs no-TI pipeline disagreements: {vb['n_disagreements']}** "
+            f"(showing up to {min(25, vb['n_disagreements'])}, injection-flagged first):",
+            "",
+            _fmt_disagreement_table(vb["disagreements"]),
+            "",
+        ]
+    md += [
+        "_Honesty note: numbers are reported exactly as measured, including any case "
+        "where the raw LLM beats the pipeline. The prompt is a fair naive prompt, not "
+        "tuned to make the baseline look bad. Caveats (single model, free-tier limits, "
+        "live URLs that may have died between snapshot and run) are in the README._",
+        "",
+    ]
+    return md
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", default=str(EVAL_DIR / "data" / "dataset_latest.json"))
@@ -274,6 +491,18 @@ def main() -> None:
                         help="skip WHOIS/DNS/TLS lookups (much faster)")
     parser.add_argument("--crawl-timeout", type=int, default=0,
                         help="override crawler timeout seconds")
+    # --- Raw-LLM baseline ("why not just ask an LLM?") ---
+    parser.add_argument("--llm-baseline", action="store_true",
+                        help="also run the naive raw-LLM baseline on the SAME URLs")
+    parser.add_argument("--llm-baseline-variant", default=VARIANT_URL_ONLY,
+                        choices=[VARIANT_URL_ONLY, VARIANT_URL_AND_TEXT, "both"],
+                        help="baseline input: URL only (default), URL+page text, or both")
+    parser.add_argument("--llm-model", default=settings.gemini_model,
+                        help="Gemini model id for the baseline")
+    parser.add_argument("--llm-min-interval", type=float, default=4.2,
+                        help="min seconds between baseline API calls (free-tier friendly)")
+    parser.add_argument("--llm-baseline-limit", type=int, default=0,
+                        help="cap baseline calls to N URLs (balanced per class; 0 = all analyzed)")
     args = parser.parse_args()
 
     if args.crawl_timeout > 0:
@@ -310,11 +539,15 @@ def main() -> None:
     ti_client.check("https://example.com/", "example.com")  # warm the feed once
 
     # --- Analyze -------------------------------------------------------------
+    # Stash page-text excerpts only if the baseline's text variant will need them.
+    capture_text = args.llm_baseline and args.llm_baseline_variant in (
+        VARIANT_URL_AND_TEXT, "both",
+    )
     records: List[Dict] = []
     done = 0
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = [
-            pool.submit(analyze_one, u, lb, retriever, trusted, domain_client, ti_client)
+            pool.submit(analyze_one, u, lb, retriever, trusted, domain_client, ti_client, capture_text)
             for u, lb in todo
         ]
         for fut in futures:
@@ -371,6 +604,9 @@ def main() -> None:
         if r["label"] == 1 and r["band_no_ti"] not in positive and r["band_with_ti"] in positive
     )
 
+    # --- Raw-LLM baseline (opt-in; same URLs; clean skip if no key) ----------
+    baseline_block = run_llm_baseline(ok, args)
+
     # --- Write outputs -------------------------------------------------------
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -394,6 +630,8 @@ def main() -> None:
         "worst_false_negatives": fns,
         "per_url": records,
     }
+    if baseline_block is not None:
+        run_meta["llm_baseline"] = baseline_block
     json_path = RESULTS_DIR / f"results_{stamp}.json"
     json_path.write_text(json.dumps(run_meta, indent=2, default=str), encoding="utf-8")
 
@@ -449,6 +687,7 @@ def main() -> None:
         "",
         _fmt_error_table(fns, "score_no_ti"),
         "",
+        *_fmt_baseline_section(baseline_block),
         "## Limitations",
         "",
         "See `evaluation/README.md` — small sample, live feeds change daily, labels are "
@@ -464,6 +703,16 @@ def main() -> None:
         m = defs["high_risk_positive"]
         print(f"{config:>18} (High Risk +): precision {m['precision']:.3f}  "
               f"recall {m['recall']:.3f}  F1 {m['f1']:.3f}  acc {m['accuracy']:.3f}")
+    if baseline_block and baseline_block.get("status") == "ok":
+        for vb in baseline_block["variants"]:
+            comp = vb.get("comparison")
+            if comp:
+                m = comp["raw_llm_baseline"]
+                print(f"{'raw-LLM ' + vb['variant']:>18} (n={comp['n']}): precision "
+                      f"{m['precision']:.3f}  recall {m['recall']:.3f}  F1 {m['f1']:.3f}  "
+                      f"acc {m['accuracy']:.3f}  (disagreements {vb['n_disagreements']})")
+    elif baseline_block:
+        print(f"{'raw-LLM baseline':>18}: {baseline_block.get('note')}")
     print(f"Saved: {json_path}\n       {md_path}\n       {cm_path}\n       {dist_path}")
 
 

@@ -237,6 +237,8 @@ class LLMExplainer:
     def _call_llm(self, system: str, user: str) -> str:
         """Dispatch to the configured provider. Returns "" on any failure."""
         try:
+            if self.provider == "gemini":
+                return self._call_gemini(system, user)
             if self.provider == "anthropic":
                 return self._call_anthropic(system, user)
             if self.provider == "openai":
@@ -245,6 +247,19 @@ class LLMExplainer:
         except Exception as exc:  # noqa: BLE001 - never propagate; fall back to deterministic
             logger.warning("LLM call failed (%s); using deterministic fallback.", exc)
         return ""
+
+    def _call_gemini(self, system: str, user: str) -> str:
+        # Shared REST client (src/gemini_client.py). Wording only, like the other
+        # providers; the returned prose is never parsed for a score/verdict.
+        from .gemini_client import gemini_generate
+
+        return gemini_generate(
+            user,
+            system=system,
+            model=settings.gemini_model,
+            max_output_tokens=settings.llm_max_tokens,
+            timeout=settings.llm_timeout_seconds,
+        )
 
     def _call_anthropic(self, system: str, user: str) -> str:
         import anthropic  # local import: only needed when the LLM path runs

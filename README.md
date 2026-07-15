@@ -19,7 +19,7 @@ readable explanation.
 Status is tracked by capability below rather than as one headline number — a
 single percentage would hide what actually runs **by default** vs. what is
 **available but disabled**. By count, roughly **19 of ~24 planned capabilities are
-implemented (~79%)**: 11 run by default, 8 are implemented but disabled in the
+implemented (~79%)**: 14 run by default, 5 are implemented but disabled in the
 default config, and ~5 remain as genuine future work.
 
 ### 1. Implemented — ON by default
@@ -46,29 +46,49 @@ default config, and ~5 remain as genuine future work.
 8. **Transparent rule-based risk engine** (0–100) with centralized weights, an
    **11-category per-category score breakdown**, evidence-conditioning, and a
    local **trusted-domain allowlist** mitigation (suppressed for severe risks).
-9. **Evidence-grounded explanation** (deterministic; cites the factors used).
-10. **Two front-ends over one shared pipeline** (`src/pipeline.py`): a Streamlit
+9. **Playwright render backend** (headless Chromium) — `RENDER_BACKEND=playwright`
+   renders JS-built pages before analysis; **falls back to the bounded GET crawler
+   automatically** (with a warning) if Chromium is missing, so the pipeline always
+   runs. Needs `playwright install chromium` (see Installation).
+10. **Dynamic-analysis (post-interaction cloaking)** — piggybacks on the Playwright
+    backend on live pages: snapshot the DOM → **scroll/wait** → snapshot again →
+    flag credential fields that appear only after interaction (the key case: a
+    password field going 0 → 1). **SAFE mode: scroll/wait/diff only, no clicking**
+    (`CLICK_LOGIN_BUTTON=false`). Scored as its own risk category, evidence-
+    conditioned and suppressed for trusted domains; a cloaking signal **alone
+    cannot reach *High Risk***.
+11. **Evidence-grounded explanation** — deterministic by default (cites the factors
+    used).
+12. **LLM explanation — WORDING ONLY** (`USE_LLM=true`). When an API key is present
+    the LLM rephrases the explanation; it **never changes the score or verdict** —
+    those stay 100% with the rule engine. Page text is scanned by the prompt-
+    injection detector **before** it reaches the LLM (raw text withheld if injection
+    is flagged). No key / any failure / timeout → **silent deterministic fallback**.
+    Default provider is **Gemini** (no SDK needed — uses `httpx`); `anthropic`/
+    `openai` also supported (needs their SDK).
+13. **Two front-ends over one shared pipeline** (`src/pipeline.py`): a Streamlit
     app and a React ("Sentinel") + FastAPI app; JSON/Markdown report export.
-11. **Test suite** (175 passing / 4 skipped) and a **reproducible evaluation
+14. **Test suite** (219 passing / 4 skipped) and a **reproducible evaluation
     harness** (`evaluation/`).
+
+> **Defensibility guarantee (LLM).** A regression test asserts the risk score and
+> per-category breakdown are **identical with the LLM on vs off** — the LLM is
+> wording only. The system also runs fully offline: with no API key and no Chromium
+> it silently uses the deterministic explainer and the requests crawler.
 
 ### 2. Implemented — available but DISABLED in the default config
 
-Built and tested, but **off by default** so the core runs offline with no heavy or
-system dependencies. Each notes why it is off / how to enable it:
+Built and tested, but **off by default** (heavier/optional deps, or a narrower use
+case). Each notes why it is off / how to enable it:
 
-- **LLM explanation** — `USE_LLM=false`. Wording-only: it rephrases the
-  explanation and **never changes the score or verdict** (those stay with the rule
-  engine). Needs a provider API key + SDK (`anthropic`/`openai`).
 - **Embedding RAG** (sentence-transformers + Chroma) — `RETRIEVER_BACKEND=tfidf`;
   optional heavy deps; **auto-falls-back to TF-IDF** if unavailable.
-- **Playwright render backend** (headless Chromium) — `RENDER_BACKEND=requests`;
-  needs `pip install playwright && playwright install chromium`.
 - **Multimodal (screenshot + OCR)** — `USE_MULTIMODAL=false`; needs Playwright and
-  the Tesseract binary.
-- **Dynamic-analysis** (post-interaction cloaking diff) — runs only with the
-  Playwright backend, so off by default.
-- **Login-click during dynamic analysis** — `CLICK_LOGIN_BUTTON=false`.
+  the Tesseract system binary.
+- **Login-click during dynamic analysis** — `CLICK_LOGIN_BUTTON=false`. Dynamic
+  analysis itself **is on**, but it only scrolls/waits/diffs and **never clicks**;
+  enabling this adds a single tightly-matched login/sign-in click (cross-origin
+  navigations reverted, never followed).
 - **Geo/ASN conflict type** — needs `GEOIP_DB_PATH` + `geoip2`. **Inactive in the
   default setup, so this specific conflict never fires by default** (the other
   conflict types — brand-vs-domain, free-email registrant, free-email+new-domain,
@@ -134,13 +154,22 @@ python -m venv .venv
 source .venv/bin/activate
 
 pip install -r requirements.txt
+
+# Required for the default render backend (headless Chromium):
+playwright install chromium
 ```
 
-(Optional) configure the LLM/crawler settings:
+If you skip `playwright install chromium`, the crawler logs a warning and falls
+back to the bounded GET backend automatically — nothing breaks.
+
+Configure runtime settings (the default config enables Playwright rendering,
+dynamic-cloaking analysis, and wording-only LLM explanation):
 
 ```bash
-cp .env.example .env   # then edit values; LLM is OFF by default
+cp .env.example .env   # then add your GEMINI_API_KEY to enable the LLM wording
 ```
+
+Without a key, `USE_LLM=true` simply uses the deterministic explainer (no error).
 
 ---
 
@@ -186,22 +215,19 @@ pytest -v
 
 ---
 
-## Optional: JS-rendering crawl backend (Playwright)
+## JS-rendering crawl backend (Playwright) — ON by default
 
-By default the crawler fetches pages with a single bounded GET request (httpx).
-For sites that build their content with JavaScript, an **optional** headless
-Chromium backend can render the page first:
+The default render backend is **headless Chromium** (`RENDER_BACKEND=playwright`),
+so JavaScript-built pages are rendered before analysis. Install the browser once:
 
 ```bash
-pip install playwright
-playwright install chromium     # required: downloads the browser
+playwright install chromium     # downloads the browser (one time)
 ```
 
-Then set in `.env`:
+To fall back to the lightweight single-GET crawler instead, set in `.env`:
 
 ```bash
-RENDER_BACKEND=playwright       # default is "requests"
-RENDER_TIMEOUT_SECONDS=8
+RENDER_BACKEND=requests
 ```
 
 Safety is preserved: navigation only (no form submission), downloads blocked,
@@ -210,21 +236,41 @@ always torn down. If Playwright or the Chromium binary is missing, the crawler
 logs a warning and **falls back to the requests backend automatically**, so the
 pipeline always runs end-to-end.
 
-### Dynamic-cloaking detection (piggybacks on the Playwright backend)
+### Dynamic-cloaking detection — ON by default (piggybacks on Playwright)
 
-When `RENDER_BACKEND=playwright`, live pages also get a **dynamic-analysis** pass
+With the Playwright backend on, live pages also get a **dynamic-analysis** pass
 that catches content revealed only *after* rendering/interaction — e.g. a login
-form or password field injected by JavaScript on scroll, a timer, or a click, so
-the initial HTML looks harmless. It snapshots credential-relevant DOM counts,
-does a minimal safe interaction (scroll in steps), snapshots again, and flags a
+form or password field injected by JavaScript on scroll or a timer, so the
+initial HTML looks harmless. It snapshots credential-relevant DOM counts, does a
+minimal **safe interaction — scroll and wait only**, snapshots again, and flags a
 material increase (the key case: a password field going 0 → 1).
 
-- **Clicking is off by default.** Set `CLICK_LOGIN_BUTTON=true` to also click a
+- **Clicking is OFF (safe mode).** Dynamic analysis only scrolls/waits/diffs.
+  Setting `CLICK_LOGIN_BUTTON=true` (not the default) would additionally click a
   control whose visible text tightly matches "log in / sign in"; cross-origin
   navigations are reverted, never followed. Arbitrary buttons are never clicked.
 - Hard-timeout wrapped, browser always closed, and skipped gracefully if the
   browser is unavailable. Its risk contribution is conservative — a cloaking
   signal alone cannot reach *High Risk*, and it is suppressed for trusted domains.
+
+## LLM explanation (wording only) — ON by default
+
+With `USE_LLM=true` (default) **and** an API key set, the human-readable
+explanation is reworded by an LLM. The **score and classification never change** —
+they are always the deterministic rule engine's output; the LLM text is used
+verbatim as prose and is never parsed back into a number. Page content is scanned
+by the prompt-injection detector **before** any text reaches the LLM: if injection
+is flagged, the raw page text is withheld and only sanitized structured evidence
+is sent. Any missing key, error, or timeout falls back silently to the
+deterministic explainer.
+
+```bash
+LLM_PROVIDER=gemini             # default; uses httpx (no extra SDK)
+GEMINI_API_KEY=...              # in .env (git-ignored); blank -> deterministic fallback
+```
+
+`anthropic` / `openai` are also supported (install their SDK and set the matching
+key). A regression test asserts the score is identical with the LLM on vs off.
 
 ---
 
@@ -364,6 +410,7 @@ for trusted-allowlist domains.
 See **"Status → 3. Genuine future work"** above for the authoritative list. In
 short: a trained ML classifier, LLM-backed *classification* (not just wording),
 large-scale labelled evaluation, a browser-extension front-end, and multi-agent
-LLM debate. The threat-intelligence, WHOIS/DNS/TLS, screenshot/OCR, and
-LLM-explanation items from earlier drafts of this README are **now implemented**
-(the last three are available but disabled in the default config).
+LLM debate. The threat-intelligence, WHOIS/DNS/TLS, Playwright rendering,
+dynamic-cloaking analysis, and wording-only LLM-explanation items from earlier
+drafts are **now implemented and ON by default**; only the screenshot/OCR
+(multimodal) and embedding-RAG stages remain implemented-but-disabled.

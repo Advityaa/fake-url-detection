@@ -110,16 +110,20 @@ def crawl_sample(sample_key: str) -> CrawlResult:
     )
 
 
-def fetch_live(url: str, timeout: Optional[int] = None) -> CrawlResult:
-    """Fetch a live URL using the configured backend (``settings.render_backend``).
+def fetch_live(
+    url: str, timeout: Optional[int] = None, render_backend: Optional[str] = None
+) -> CrawlResult:
+    """Fetch a live URL using ``render_backend`` (or ``settings.render_backend``).
 
     ``"playwright"`` renders the page with headless Chromium; if Playwright or the
     Chromium binary is unavailable, a warning is logged and this transparently
     falls back to the bounded GET :func:`crawl_url`. ``"requests"`` (default) uses
-    :func:`crawl_url` directly. Either way a :class:`CrawlResult` is returned and
-    the pipeline runs end-to-end.
+    :func:`crawl_url` directly. The ``render_backend`` argument is a per-request
+    override (used by the UI stage toggles) that takes precedence over the setting.
+    Either way a :class:`CrawlResult` is returned and the pipeline runs end-to-end.
     """
-    if settings.render_backend == "playwright":
+    backend = render_backend or settings.render_backend
+    if backend == "playwright":
         try:
             from .browser_fetch import BrowserUnavailable, fetch_rendered
 
@@ -136,8 +140,8 @@ def fetch_live(url: str, timeout: Optional[int] = None) -> CrawlResult:
                 "Playwright render backend could not be loaded (%s); using the requests crawler.",
                 exc,
             )
-    elif settings.render_backend != "requests":
-        logger.warning("Unknown RENDER_BACKEND %r; using the requests crawler.", settings.render_backend)
+    elif backend != "requests":
+        logger.warning("Unknown render backend %r; using the requests crawler.", backend)
 
     return crawl_url(url, timeout)
 

@@ -1,8 +1,16 @@
 """Central configuration for the phishing-rag-mvp prototype.
 
 All values are read from environment variables (optionally loaded from a local
-`.env` file via python-dotenv). No secrets are hard-coded. The project is
-designed to run fully offline by default (USE_LLM=false).
+`.env` file via python-dotenv). No secrets are hard-coded.
+
+The default (demo) configuration enables three optional stages — the Playwright
+render backend, post-interaction dynamic-cloaking analysis, and wording-only LLM
+explanations — because they are useful in a live demo. Every one of them degrades
+gracefully: if Chromium is not installed the crawler falls back to the bounded
+GET path, and if no LLM API key is set (or a call fails) the deterministic
+explainer is used. So the system still runs fully end-to-end offline; enabling
+these stages never introduces a hard dependency. The remaining optional stages
+(multimodal OCR, embedding RAG, login-clicking, PhishTank, geo/ASN) stay OFF.
 """
 
 from __future__ import annotations
@@ -61,8 +69,11 @@ def _get_int(name: str, default: int) -> int:
 class Settings:
     """Runtime settings for the prototype."""
 
-    # LLM toggle / provider (off by default -> deterministic fallback).
-    use_llm: bool = field(default_factory=lambda: _get_bool("USE_LLM", False))
+    # LLM toggle / provider. ON in the default demo config, but WORDING ONLY —
+    # the score/classification are always the deterministic risk engine's. With no
+    # API key configured, ``llm_is_available()`` is False and the deterministic
+    # explainer is used, so this default never forces a network dependency.
+    use_llm: bool = field(default_factory=lambda: _get_bool("USE_LLM", True))
     llm_provider: str = field(
         default_factory=lambda: os.getenv("LLM_PROVIDER", "anthropic").strip().lower()
     )
@@ -72,11 +83,21 @@ class Settings:
     openai_api_key: str = field(
         default_factory=lambda: os.getenv("OPENAI_API_KEY", "").strip()
     )
+    # Gemini (Google Generative Language API). GOOGLE_API_KEY is accepted as an
+    # alias so either common env name works.
+    gemini_api_key: str = field(
+        default_factory=lambda: (
+            os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or ""
+        ).strip()
+    )
     anthropic_model: str = field(
         default_factory=lambda: os.getenv("ANTHROPIC_MODEL", "claude-opus-4-8")
     )
     openai_model: str = field(
         default_factory=lambda: os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    )
+    gemini_model: str = field(
+        default_factory=lambda: os.getenv("GEMINI_MODEL", "gemini-flash-latest").strip()
     )
     # LLM call safety limits (used only when USE_LLM=true and a key is present).
     llm_timeout_seconds: int = field(
@@ -97,11 +118,12 @@ class Settings:
             "phishing-rag-mvp-research-bot/0.1 (defensive-research; +local-prototype)",
         )
     )
-    # Fetch backend for live crawling: "requests" (default; bounded GET via httpx)
-    # or "playwright" (headless Chromium rendering). Falls back to "requests" if
-    # Playwright/Chromium is unavailable.
+    # Fetch backend for live crawling: "playwright" (default in the demo config;
+    # headless Chromium rendering) or "requests" (bounded GET via httpx). The
+    # playwright backend also gates the dynamic-cloaking analysis stage. Falls back
+    # to the requests crawler automatically if Playwright/Chromium is unavailable.
     render_backend: str = field(
-        default_factory=lambda: os.getenv("RENDER_BACKEND", "requests").strip().lower()
+        default_factory=lambda: os.getenv("RENDER_BACKEND", "playwright").strip().lower()
     )
     render_timeout_seconds: int = field(
         default_factory=lambda: _get_int("RENDER_TIMEOUT_SECONDS", 8)
@@ -179,6 +201,8 @@ class Settings:
             return bool(self.anthropic_api_key)
         if self.llm_provider == "openai":
             return bool(self.openai_api_key)
+        if self.llm_provider == "gemini":
+            return bool(self.gemini_api_key)
         return False
 
 

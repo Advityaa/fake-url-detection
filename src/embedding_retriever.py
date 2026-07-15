@@ -162,15 +162,18 @@ class EmbeddingRetriever(RAGRetriever):
         return evidence
 
 
-def build_retriever(knowledge_base_path: Optional[Path] = None) -> RAGRetriever:
+def build_retriever(
+    knowledge_base_path: Optional[Path] = None, backend: Optional[str] = None
+) -> RAGRetriever:
     """Return the configured retriever, falling back to TF-IDF on any problem.
 
-    Selected by ``settings.retriever_backend`` ("tfidf" | "embedding"). The
-    embedding backend is attempted only when explicitly requested; if its heavy
-    dependencies or model are unavailable, a clear warning is logged and the
-    proven TF-IDF retriever is returned instead. The demo never hard-crashes.
+    Selected by ``backend`` (per-request override) or ``settings.retriever_backend``
+    ("tfidf" | "embedding"). The embedding backend is attempted only when
+    explicitly requested; if its heavy dependencies or model are unavailable, a
+    clear warning is logged and the proven TF-IDF retriever is returned instead.
+    The demo never hard-crashes.
     """
-    backend = (settings.retriever_backend or "tfidf").lower()
+    backend = (backend or settings.retriever_backend or "tfidf").lower()
     if backend == "embedding":
         try:
             retriever = EmbeddingRetriever(knowledge_base_path)

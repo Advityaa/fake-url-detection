@@ -1,6 +1,8 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 
-const API_URL = 'http://localhost:8000/api/analyze';
+const API_BASE = 'http://localhost:8000/api';
+const API_URL = `${API_BASE}/analyze`;
+const CAPS_URL = `${API_BASE}/capabilities`;
 
 const MODES = [
   { value: 'live', label: 'Live Check' },
@@ -9,8 +11,22 @@ const MODES = [
   { value: 'prompt_injection', label: 'Sample: AI Prompt Injection' },
 ];
 
+// Toggleable optional stages. `key` matches the /api/capabilities keys; the
+// request-body translation lives in buildOverrides().
+const STAGE_DEFS = [
+  { key: 'threat_intel', label: 'Threat-intel feeds', desc: 'OpenPhish / PhishTank lookup' },
+  { key: 'domain_intel', label: 'Domain reputation', desc: 'WHOIS age · DNS · TLS · conflicts' },
+  { key: 'render_playwright', label: 'Playwright render', desc: 'Headless Chromium (vs plain GET)' },
+  { key: 'dynamic', label: 'Dynamic analysis', desc: 'Post-interaction cloaking (needs render)' },
+  { key: 'multimodal', label: 'Multimodal OCR', desc: 'Screenshot + OCR (needs render + Tesseract)' },
+  { key: 'embedding', label: 'Embedding RAG', desc: 'Vector retrieval (vs TF-IDF)' },
+  { key: 'llm', label: 'LLM explanation', desc: 'Rephrases wording only (needs API key)' },
+];
+
 // Strip the trailing "[+N]." / "[-N]." scoring annotation for readability.
 const clean = (s) => (s || '').replace(/\s*\[[+-]?\d+\]\.?$/, '').replace(/\s*\[[+-]?\d+\]/, '');
+const yesNo = (v) => (v === true ? 'yes' : v === false ? 'no' : '—');
+const num = (v, d = 2) => (typeof v === 'number' ? v.toFixed(d) : '—');
 
 function bandClass(label) {
   if (label === 'Likely Safe') return 'safe';
@@ -24,6 +40,21 @@ function bandColor(label) {
   if (label === 'Needs Caution') return 'var(--warn)';
   if (label === 'High Risk') return 'var(--danger)';
   return 'var(--accent)';
+}
+
+// Translate toggle state -> analyze request overrides. Unavailable stages are
+// forced off so the request never asks for a stage whose deps are missing.
+function buildOverrides(toggles, caps) {
+  const on = (k) => (caps?.[k]?.available ? !!toggles[k] : false);
+  return {
+    enable_threat_intel: on('threat_intel'),
+    enable_domain_intel: on('domain_intel'),
+    enable_multimodal: on('multimodal'),
+    enable_dynamic: on('dynamic'),
+    enable_llm: on('llm'),
+    render_backend: on('render_playwright') ? 'playwright' : 'requests',
+    retriever_backend: on('embedding') ? 'embedding' : 'tfidf',
+  };
 }
 
 /* ---------- Circular risk gauge ---------- */
@@ -97,22 +128,265 @@ function KV({ k, v, tone }) {
   );
 }
 
+/* ---------- Stage toggles (interactive ablation) ---------- */
+function StageToggles({ caps, toggles, setToggles, disabled }) {
+  if (!caps || !toggles) return null;
+  const flip = (k) => setToggles((t) => ({ ...t, [k]: !t[k] }));
+  return (
+    <div className="panel">
+      <h3 className="section-title">Analysis stages · interactive ablation</h3>
+      <div className="toggles">
+        {STAGE_DEFS.map((s) => {
+          const cap = caps[s.key] || {};
+          const available = !!cap.available;
+          const checked = available && !!toggles[s.key];
+          return (
+            <label className={`toggle-row ${checked ? '' : 'off'}`} key={s.key}>
+              <input
+                type="checkbox"
+                checked={checked}
+                disabled={disabled || !available}
+                onChange={() => flip(s.key)}
+              />
+              <span className="t-body">
+                <span className="t-label">{s.label}</span>
+                <span className="t-desc">{s.desc}</span>
+                {!available && <span className="t-reason">Unavailable — {cap.reason || 'dependency missing'}</span>}
+              </span>
+            </label>
+          );
+        })}
+      </div>
+      <p className="hint" style={{ margin: '1rem 0 0', textAlign: 'left' }}>
+        Toggle stages off to see how the verdict and score change. Greyed-out stages
+        need a dependency that isn’t installed. Sample modes skip live-only stages.
+      </p>
+    </div>
+  );
+}
+
+/* ---------- Threat-intel detail ---------- */
+function ThreatIntelPanel({ ti }) {
+  return (
+    <div className="panel">
+      <div className="stage-head">
+        <h3 className="section-title" style={{ margin: 0 }}>Threat-intel feeds</h3>
+        {!ti?.checked ? <span className="badge">not run</span>
+          : ti.listed ? <span className="badge bad">listed</span>
+            : <span className="badge good">not listed</span>}
+      </div>
+      {!ti?.checked ? (
+        <p className="stage-off">{ti?.confidence_note || 'Threat-intel lookup was disabled for this run.'}</p>
+      ) : (
+        <>
+          {ti.listed ? (
+            <FactorList
+              items={[`Listed on ${ti.source || 'a feed'}${ti.matched_value ? `: ${ti.matched_value}` : ''}`]}
+              icon="🚩" emptyText="" />
+          ) : (
+            <p className="empty" style={{ fontStyle: 'normal', color: 'var(--text-dim)' }}>
+              Not found in any consulted feed.
+            </p>
+          )}
+          <div className="kv" style={{ marginTop: '1rem' }}>
+            <KV k="Sources checked" v={(ti.sources_checked || []).join(', ') || '—'} />
+            <KV k="Matched feed" v={ti.source || '—'} tone={ti.listed ? 'bad' : ''} />
+          </div>
+          {ti.confidence_note && <p className="explain src" style={{ marginTop: '.8rem' }}>{ti.confidence_note}</p>}
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ---------- Domain reputation detail ---------- */
+function DomainIntelPanel({ di }) {
+  return (
+    <div className="panel">
+      <div className="stage-head">
+        <h3 className="section-title" style={{ margin: 0 }}>Domain reputation</h3>
+        {!di?.checked ? <span className="badge">not run</span>
+          : di.conflict_count > 0 ? <span className="badge bad">{di.conflict_count} conflict{di.conflict_count > 1 ? 's' : ''}</span>
+            : <span className="badge good">no conflicts</span>}
+      </div>
+      {!di?.checked ? (
+        <p className="stage-off">Domain reputation lookups (WHOIS / DNS / TLS) were not run for this analysis.</p>
+      ) : (
+        <>
+          <div className="kv">
+            {di.whois_available ? (
+              <>
+                <KV k="Registrar" v={di.registrar || '—'} />
+                <KV k="Registered on" v={di.domain_created || '—'} />
+                <KV k="Domain age (days)"
+                  v={di.domain_age_days ?? '—'}
+                  tone={di.is_newly_registered ? 'bad' : di.domain_age_days != null ? 'good' : ''} />
+                <KV k="Registrant country" v={di.registrant_country || '—'} />
+              </>
+            ) : <KV k="WHOIS" v="unavailable" />}
+            {di.dns_available ? (
+              <>
+                <KV k="Resolves (A record)" v={yesNo(di.resolves)} tone={di.resolves ? 'good' : di.resolves === false ? 'bad' : ''} />
+                <KV k="Mail records (MX)" v={yesNo(di.has_mx)} />
+              </>
+            ) : <KV k="DNS" v="unavailable" />}
+            {di.tls_available ? (
+              <>
+                <KV k="TLS issuer" v={di.cert_issuer || '—'} />
+                <KV k="Cert org (OV/EV)" v={di.cert_org || '—'} />
+                <KV k="Cert valid until" v={di.cert_valid_until || '—'} />
+                <KV k="Cert currently valid" v={yesNo(di.cert_currently_valid)} tone={di.cert_currently_valid === false ? 'bad' : ''} />
+                <KV k="Self-signed" v={yesNo(di.cert_self_signed)} tone={di.cert_self_signed ? 'bad' : ''} />
+              </>
+            ) : <KV k="TLS" v="not checked (HTTP or unavailable)" />}
+            {di.asn_available && (
+              <>
+                <KV k="IP country" v={di.ip_country || '—'} />
+                <KV k="Hosting ASN" v={di.asn_org || '—'} />
+              </>
+            )}
+          </div>
+          {di.conflict_count > 0 && (
+            <div style={{ marginTop: '1.1rem' }}>
+              <h4 style={{ fontSize: '.82rem', color: 'var(--text-dim)', marginBottom: '.5rem' }}>
+                Cross-signal conflicts
+              </h4>
+              <FactorList items={di.conflicts} icon="⚠️" emptyText="" />
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ---------- Multimodal (screenshot + OCR) detail ---------- */
+function MultimodalPanel({ mm }) {
+  const ran = mm?.checked && mm?.available;
+  return (
+    <div className="panel">
+      <div className="stage-head">
+        <h3 className="section-title" style={{ margin: 0 }}>Multimodal (screenshot + OCR)</h3>
+        {!mm?.checked ? <span className="badge">not run</span>
+          : !mm.available ? <span className="badge warn">unavailable</span>
+            : (mm.brand_in_image || mm.text_divergence || mm.injection_in_ocr)
+              ? <span className="badge bad">signals</span>
+              : <span className="badge good">clean</span>}
+      </div>
+      {!ran ? (
+        <p className="stage-off">{mm?.note || 'Multimodal analysis was not run.'}</p>
+      ) : (
+        <>
+          <div className="kv">
+            <KV k="Brand seen in image" v={mm.brand_in_image || 'none'} tone={mm.brand_in_image ? 'bad' : 'good'} />
+            <KV k="Text divergence" v={yesNo(mm.text_divergence)} tone={mm.text_divergence ? 'bad' : 'good'} />
+            <KV k="Divergence ratio" v={num(mm.divergence_ratio)} />
+            <KV k="Injection in OCR" v={yesNo(mm.injection_in_ocr)} tone={mm.injection_in_ocr ? 'bad' : 'good'} />
+            {mm.injection_in_ocr && <KV k="Injection severity" v={mm.injection_severity} tone="bad" />}
+            <KV k="OCR characters" v={mm.ocr_char_count ?? '—'} />
+          </div>
+          {mm.divergent_terms?.length > 0 && (
+            <div className="tag-row">
+              {mm.divergent_terms.map((t, i) => <span className="tag" key={i}>{t}</span>)}
+            </div>
+          )}
+          {mm.ocr_text_excerpt && <div className="snippet">{mm.ocr_text_excerpt}</div>}
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ---------- Dynamic (pre/post interaction) detail ---------- */
+function DynamicPanel({ dy }) {
+  const ran = dy?.checked && dy?.available;
+  const pre = dy?.pre || {};
+  const post = dy?.post || {};
+  const rows = [
+    ['Forms', 'forms', dy?.delta_forms],
+    ['Inputs', 'inputs', dy?.delta_inputs],
+    ['Password fields', 'password_fields', dy?.delta_password_fields],
+    ['Visible password fields', 'visible_password_fields', dy?.delta_visible_password_fields],
+  ];
+  return (
+    <div className="panel">
+      <div className="stage-head">
+        <h3 className="section-title" style={{ margin: 0 }}>Dynamic analysis (post-interaction)</h3>
+        {!dy?.checked ? <span className="badge">not run</span>
+          : !dy.available ? <span className="badge warn">unavailable</span>
+            : dy.cloaking_detected ? <span className="badge bad">cloaking</span>
+              : <span className="badge good">no cloaking</span>}
+      </div>
+      {!ran ? (
+        <p className="stage-off">{dy?.note || 'Dynamic analysis was not run.'}</p>
+      ) : (
+        <>
+          <table className="difftable">
+            <thead>
+              <tr><th>DOM element</th><th style={{ textAlign: 'right' }}>Before</th><th style={{ textAlign: 'right' }}>After</th><th style={{ textAlign: 'right' }}>Δ</th></tr>
+            </thead>
+            <tbody>
+              {rows.map(([label, field, delta]) => (
+                <tr key={field}>
+                  <td>{label}</td>
+                  <td className="num">{pre[field] ?? 0}</td>
+                  <td className="num">{post[field] ?? 0}</td>
+                  <td className={`num delta ${delta > 0 ? 'pos' : ''}`}>{delta > 0 ? `+${delta}` : (delta ?? 0)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="kv" style={{ marginTop: '1rem' }}>
+            <KV k="Clicked login control" v={yesNo(dy.clicked_login)} />
+            <KV k="Cloaking detected" v={yesNo(dy.cloaking_detected)} tone={dy.cloaking_detected ? 'bad' : 'good'} />
+          </div>
+          {dy.reasons?.length > 0 && (
+            <div style={{ marginTop: '1rem' }}>
+              <FactorList items={dy.reasons} icon="⚠️" emptyText="" />
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 function App() {
   const [url, setUrl] = useState('');
   const [mode, setMode] = useState('live');
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
+  const [caps, setCaps] = useState(null);
+  const [toggles, setToggles] = useState(null);
+
+  // Load stage capabilities once; initialise toggle state from each stage's
+  // configured default (unavailable stages start off).
+  useEffect(() => {
+    let cancelled = false;
+    fetch(CAPS_URL)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error('caps'))))
+      .then((c) => {
+        if (cancelled) return;
+        setCaps(c);
+        const init = {};
+        STAGE_DEFS.forEach((s) => { init[s.key] = !!(c[s.key]?.available && c[s.key]?.default); });
+        setToggles(init);
+      })
+      .catch(() => { /* backend may be down; toggles simply stay hidden */ });
+    return () => { cancelled = true; };
+  }, []);
 
   const analyze = async (e) => {
     e.preventDefault();
     if (mode === 'live' && !url.trim()) { setError('Please enter a URL to check.'); return; }
     setLoading(true); setError(null); setResult(null);
     try {
+      const body = { url, mode, ...(toggles ? buildOverrides(toggles, caps) : {}) };
       const res = await fetch(API_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, mode }),
+        body: JSON.stringify(body),
       });
       if (!res.ok) {
         const detail = await res.json().catch(() => ({}));
@@ -160,8 +434,10 @@ function App() {
           : 'Sample mode loads a bundled local page; the URL field is ignored.'}
       </p>
 
+      <StageToggles caps={caps} toggles={toggles} setToggles={setToggles} disabled={loading} />
+
       {error && (
-        <div className="panel error-box"><h3>Error</h3><p>{error}</p></div>
+        <div className="panel error-box" style={{ marginTop: '1.4rem' }}><h3>Error</h3><p>{error}</p></div>
       )}
 
       {loading && (
@@ -169,7 +445,7 @@ function App() {
       )}
 
       {result && ra && (
-        <div className="results">
+        <div className="results" style={{ marginTop: '1.4rem' }}>
           {/* Verdict hero */}
           <div className={`panel verdict ${band}`}>
             <Gauge score={result.risk_score} label={label} />
@@ -225,6 +501,17 @@ function App() {
             </div>
           </div>
 
+          {/* Backend analysis stages */}
+          <h3 className="stage-section-title">Backend analysis stages</h3>
+          <div className="grid-2">
+            <ThreatIntelPanel ti={result.threat_intel} />
+            <DomainIntelPanel di={result.domain_intel} />
+          </div>
+          <div className="grid-2">
+            <MultimodalPanel mm={result.multimodal} />
+            <DynamicPanel dy={result.dynamic_analysis} />
+          </div>
+
           {/* Prompt injection */}
           <div className={`panel ${pi?.injection_detected ? 'alert' : 'alert clean'}`}>
             <h3 className="section-title">Hidden instruction check</h3>
@@ -267,6 +554,12 @@ function App() {
             <p>{result.explanation}</p>
             <p className="src">Source: {result.explanation_source}</p>
           </div>
+
+          {/* Raw JSON (collapsible) */}
+          <details className="panel raw">
+            <summary>Raw analysis JSON</summary>
+            <pre>{JSON.stringify(result, null, 2)}</pre>
+          </details>
 
           <p className="disclaimer">
             Sentinel is a research prototype for decision support — it uses transparent

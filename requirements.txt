@@ -43,11 +43,13 @@ uvicorn>=0.29.0,<1.0
 # sentence-transformers>=3.0,<6.0   # local MiniLM embeddings
 # chromadb>=0.5,<2.0                 # local persistent vector DB
 
-# Optional: headless-browser rendering. Needed for RENDER_BACKEND=playwright
-# (JS-rendered crawling) and/or USE_MULTIMODAL=true (screenshot + OCR).
-# Requires a SYSTEM step too: `playwright install chromium`. Both features are
-# off by default and fall back gracefully if Playwright/Chromium is missing.
-# playwright>=1.40,<2.0    # headless Chromium rendering
+# Headless-browser rendering. ON in the default demo config
+# (RENDER_BACKEND=playwright), which also gates the dynamic-cloaking analysis
+# stage. Requires a one-time SYSTEM step after pip install:
+#     playwright install chromium
+# If Playwright or the Chromium binary is missing, the crawler logs a warning and
+# falls back to the bounded requests crawler automatically (no crash).
+playwright>=1.40,<2.0
 
 # Optional: only needed when USE_MULTIMODAL=true (screenshot + OCR stage).
 # Also requires the Tesseract OCR SYSTEM binary:

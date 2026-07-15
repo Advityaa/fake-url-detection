@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import List, Optional, Sequence
 
+from .capabilities import llm_key_present
 from .config import settings
 from .crawler import crawl_sample, fetch_live
 from .domain_intel import DomainIntelClient
@@ -45,6 +46,11 @@ def analyze_url(
     enable_threat_intel: bool = True,
     multimodal: Optional[MultimodalResult] = None,
     dynamic: Optional[DynamicAnalysisResult] = None,
+    enable_domain_intel: Optional[bool] = None,
+    enable_multimodal: Optional[bool] = None,
+    enable_dynamic: Optional[bool] = None,
+    enable_llm: Optional[bool] = None,
+    render_backend: Optional[str] = None,
 ) -> Optional[FinalAnalysisResult]:
     """Run the full analysis pipeline for a URL.
 
@@ -54,6 +60,16 @@ def analyze_url(
         retriever: A (preferably cached) RAG retriever instance.
         trusted_domains: Iterable of lowercased trusted registered domains.
         limitations: Optional list of caveats to attach to the result.
+
+    Per-request stage overrides (all default ``None`` = use the configured
+    ``settings`` default). These are the wiring behind the UI stage toggles so a
+    reviewer can run an interactive ablation without editing config; they only
+    turn existing stages on/off and never change detection logic:
+        enable_domain_intel: Force WHOIS/DNS/TLS reputation on/off.
+        enable_multimodal: Force screenshot+OCR on/off (live mode only).
+        enable_dynamic: Force post-interaction cloaking analysis on/off.
+        enable_llm: Force the LLM explanation on/off (on only if a key is set).
+        render_backend: Override the crawl backend ("requests" | "playwright").
 
     Returns:
         A populated :class:`FinalAnalysisResult`, or ``None`` if live mode was
@@ -68,7 +84,7 @@ def analyze_url(
     # 1. Crawl (live, HTTPS-first) or load sample HTML. fetch_live selects the
     #    render backend (requests | playwright) from config, with safe fallback.
     if mode == "live":
-        crawl = fetch_live(normalized)
+        crawl = fetch_live(normalized, render_backend=render_backend)
     else:
         crawl = crawl_sample(mode)
 
@@ -108,8 +124,13 @@ def analyze_url(
 
     # 8. Domain reputation (WHOIS age / DNS / TLS). Live lookups only make sense
     #    for real domains, so sample modes skip them unless a client is injected
-    #    (tests inject mocked clients and may use sample mode).
-    if domain_client is not None or mode == "live":
+    #    (tests inject mocked clients and may use sample mode). A per-request
+    #    ``enable_domain_intel`` override (UI toggle) wins over the default gate.
+    if enable_domain_intel is None:
+        want_domain_intel = domain_client is not None or mode == "live"
+    else:
+        want_domain_intel = enable_domain_intel
+    if want_domain_intel:
         domain_intel = (domain_client or get_default_domain_client()).gather(
             threat_url, registered_domain, page_brands=html_analysis.brand_like_words
         )
@@ -121,7 +142,8 @@ def analyze_url(
     #    OCR text is treated as untrusted (scanned for injection, never obeyed).
     #    A caller-supplied ``multimodal`` (e.g. tests) is used as-is.
     if multimodal is None:
-        if settings.use_multimodal and mode == "live":
+        want_multimodal = settings.use_multimodal if enable_multimodal is None else enable_multimodal
+        if want_multimodal and mode == "live":
             multimodal = run_multimodal(
                 threat_url, crawl.visible_text, registered_domain,
                 is_trusted_domain=is_trusted,
@@ -135,7 +157,12 @@ def analyze_url(
     #     render backend and a live URL. Skips gracefully if the browser is
     #     unavailable. A caller-supplied ``dynamic`` (tests) is used as-is.
     if dynamic is None:
-        if settings.render_backend == "playwright" and mode == "live":
+        effective_render = render_backend or settings.render_backend
+        if enable_dynamic is None:
+            want_dynamic = effective_render == "playwright"
+        else:
+            want_dynamic = enable_dynamic
+        if want_dynamic and mode == "live":
             dynamic = run_dynamic_analysis(
                 threat_url, registered_domain, is_trusted_domain=is_trusted
             )
@@ -180,6 +207,11 @@ def analyze_url(
     #     explainer can include it as clearly-delimited untrusted evidence — it
     #     is withheld automatically when prompt injection is detected.
     explainer = LLMExplainer()
+    # Per-request LLM override (UI toggle): force the LLM path on only when a
+    # provider key is actually configured; force off unconditionally. Wording is
+    # still the only thing the LLM affects — the score/classification are fixed.
+    if enable_llm is not None:
+        explainer.available = bool(enable_llm) and llm_key_present()
     explanation, source = explainer.generate_explanation(
         url_features, html_analysis, prompt_injection, retrieved, risk,
         page_text=crawl.visible_text,
