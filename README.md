@@ -84,7 +84,7 @@ case). Each notes why it is off / how to enable it:
 - **Embedding RAG** (sentence-transformers + Chroma) — `RETRIEVER_BACKEND=tfidf`;
   optional heavy deps; **auto-falls-back to TF-IDF** if unavailable.
 - **Multimodal (screenshot + OCR)** — `USE_MULTIMODAL=false`; needs Playwright and
-  the Tesseract system binary.
+  EasyOCR (or optional Tesseract fallback).
 - **Login-click during dynamic analysis** — `CLICK_LOGIN_BUTTON=false`. Dynamic
   analysis itself **is on**, but it only scrolls/waits/diffs and **never clicks**;
   enabling this adds a single tightly-matched login/sign-in click (cross-origin

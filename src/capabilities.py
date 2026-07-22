@@ -24,7 +24,9 @@ def _importable(module: str) -> bool:
         return False
 
 
-def _tesseract_present() -> bool:
+def _ocr_present() -> bool:
+    if _importable("easyocr"):
+        return True
     cmd = settings.tesseract_cmd or "tesseract"
     if os.path.sep in cmd:
         return os.path.exists(cmd)
@@ -49,7 +51,7 @@ def _cap(available: bool, default: bool, reason: str = "") -> Dict:
 def capabilities() -> Dict[str, Dict]:
     """Return per-stage ``{available, default, reason}`` for the optional stages."""
     playwright = _importable("playwright")
-    tesseract = _tesseract_present()
+    ocr = _ocr_present()
     embedding = _importable("sentence_transformers") and _importable("chromadb")
 
     return {
@@ -64,8 +66,8 @@ def capabilities() -> Dict[str, Dict]:
             "needs the Playwright render backend",
         ),
         "multimodal": _cap(
-            playwright and tesseract, settings.use_multimodal,
-            "needs Playwright + the Tesseract OCR binary",
+            playwright and ocr, settings.use_multimodal,
+            "needs Playwright + an OCR engine (EasyOCR or Tesseract)",
         ),
         "embedding": _cap(
             embedding, settings.retriever_backend == "embedding",

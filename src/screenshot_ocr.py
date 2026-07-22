@@ -121,9 +121,30 @@ def capture_screenshot(url: str, out_path: Path, timeout_seconds: int) -> bool:
     return out_path.exists()
 
 
+_EASYOCR_READER = None
+
+
+def _get_easyocr_reader():
+    global _EASYOCR_READER
+    if _EASYOCR_READER is None:
+        import easyocr
+
+        _EASYOCR_READER = easyocr.Reader(["en"], gpu=False, verbose=False)
+    return _EASYOCR_READER
+
+
 def run_ocr(image_path: Path) -> str:
-    """Extract text from an image with Tesseract (via pytesseract). Raises on failure."""
-    import pytesseract  # lazy: needs the system `tesseract` binary
+    """Extract text from an image using EasyOCR (primary) or pytesseract (fallback)."""
+    try:
+        import easyocr
+
+        reader = _get_easyocr_reader()
+        results = reader.readtext(str(image_path), detail=0)
+        return " ".join(results)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("EasyOCR not used or failed (%s); trying pytesseract fallback.", exc)
+
+    import pytesseract  # lazy: fallback if installed
     from PIL import Image
 
     # Point pytesseract at an explicit binary if configured (e.g. conda install).

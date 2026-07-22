@@ -135,7 +135,7 @@ _STAGE_DEFS = [
     ("domain_intel", "Domain reputation", "WHOIS age · DNS · TLS · conflicts"),
     ("render_playwright", "Playwright render", "Headless Chromium (vs plain GET)"),
     ("dynamic", "Dynamic analysis", "Post-interaction cloaking (needs render)"),
-    ("multimodal", "Multimodal OCR", "Screenshot + OCR (needs render + Tesseract)"),
+    ("multimodal", "Multimodal OCR", "Screenshot + OCR (needs render + EasyOCR)"),
     ("embedding", "Embedding RAG", "Vector retrieval (vs TF-IDF)"),
     ("llm", "LLM explanation", "Rephrases wording only (needs API key)"),
 ]

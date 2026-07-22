@@ -1,0 +1,11 @@
+{
+  "name": "fake-url-detection",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "npm run dev --prefix frontend",
+    "ui": "npm run dev --prefix frontend",
+    "api": "python -m uvicorn api:app --port 8000 --reload",
+    "start": "python -m uvicorn api:app --port 8000 & npm run dev --prefix frontend"
+  }
+}
