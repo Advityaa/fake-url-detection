@@ -135,6 +135,7 @@ def _get_easyocr_reader():
 
 def run_ocr(image_path: Path) -> str:
     """Extract text from an image using EasyOCR (primary) or pytesseract (fallback)."""
+    easyocr_error = None
     try:
         import easyocr
 
@@ -142,17 +143,22 @@ def run_ocr(image_path: Path) -> str:
         results = reader.readtext(str(image_path), detail=0)
         return " ".join(results)
     except Exception as exc:  # noqa: BLE001
-        logger.debug("EasyOCR not used or failed (%s); trying pytesseract fallback.", exc)
+        easyocr_error = exc
+        logger.debug("EasyOCR failed (%s); trying pytesseract fallback.", exc)
 
-    import pytesseract  # lazy: fallback if installed
-    from PIL import Image
+    try:
+        import pytesseract
+        from PIL import Image
 
-    # Point pytesseract at an explicit binary if configured (e.g. conda install).
-    if settings.tesseract_cmd:
-        pytesseract.pytesseract.tesseract_cmd = settings.tesseract_cmd
+        if settings.tesseract_cmd:
+            pytesseract.pytesseract.tesseract_cmd = settings.tesseract_cmd
 
-    with Image.open(image_path) as img:
-        return pytesseract.image_to_string(img) or ""
+        with Image.open(image_path) as img:
+            return pytesseract.image_to_string(img) or ""
+    except Exception as exc:  # noqa: BLE001
+        if easyocr_error:
+            raise RuntimeError(f"OCR engine failed (EasyOCR error: {easyocr_error})") from exc
+        raise
 
 
 # ---------------------------------------------------------------------------
